@@ -167,6 +167,12 @@ function run_simulation(; bind_addr::String = "tcp://*:5555",
     # downstream consumers know the *truth-side* uncertainty of this packet).
     cov_truth = SVector(1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4)
 
+    # Wall-clock pacing: we want to *emit* one packet every dt_publish seconds
+    # of real time (soft real-time, 100 Hz default). Without this the loop
+    # would run at maximum CPU speed and finish 10 minutes of simulated flight
+    # in < 1 second of wall time, before any subscriber can connect.
+    t_wall0 = time()
+
     try
         while integ.t < duration_s
             step!(integ, dt_publish, true)            # advance exactly dt_publish
@@ -183,6 +189,13 @@ function run_simulation(; bind_addr::String = "tcp://*:5555",
             if pkt_id % 200 == 0
                 @printf("[sim] t=%7.2fs  pos=(%8.2f %8.2f %8.2f)  |W|=%.3f\n",
                         integ.t, u[1], u[2], u[3], hypot(u[7], u[8], u[9]))
+            end
+
+            # Soft real-time pacing.
+            t_target = t_wall0 + integ.t
+            t_lag    = t_target - time()
+            if t_lag > 0
+                sleep(t_lag)
             end
         end
     catch e

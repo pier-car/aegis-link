@@ -236,7 +236,14 @@ int main(int argc, char** argv)
 
     while (g_running.load(std::memory_order_relaxed)) {
         zmq::message_t msg;
-        const auto rc = sub.recv(msg, zmq::recv_flags::none);
+        zmq::recv_result_t rc;
+        try {
+            rc = sub.recv(msg, zmq::recv_flags::none);
+        } catch (const zmq::error_t& e) {
+            if (e.num() == EINTR || e.num() == ETERM) break;   // clean shutdown
+            std::cerr << "[trk] WARN: recv error: " << e.what() << '\n';
+            continue;
+        }
         if (!rc) continue;
         if (msg.size() != sizeof(TrackPacket)) {
             std::cerr << "[trk] WARN: bad packet size " << msg.size() << '\n';

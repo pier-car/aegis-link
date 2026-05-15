@@ -53,3 +53,6 @@ run.csv
 GUIDE_LOCAL.md
 NOTES_LOCAL.*
 *.local.md
+run_demo.sh
+analysis.ipynb
+logs/
