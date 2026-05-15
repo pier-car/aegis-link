@@ -48,3 +48,8 @@ Thumbs.db
 run.csv
 *.log
 /tmp_*/
+
+# --- Local notes (not for the repo) ------------------------------------------
+GUIDE_LOCAL.md
+NOTES_LOCAL.*
+*.local.md
