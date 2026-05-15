@@ -55,4 +55,9 @@ NOTES_LOCAL.*
 *.local.md
 run_demo.sh
 analysis.ipynb
+viz_live.py
 logs/
+replay.gif
+replay.mp4
+*.png
+
