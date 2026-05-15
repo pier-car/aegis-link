@@ -27,8 +27,9 @@
 ################################################################################
 
 using Pkg
-# Ensure deps are present (cheap if already instantiated).
-for pkg in ("ZMQ", "StaticArrays", "DifferentialEquations", "Random")
+# Ensure deps are present (cheap if already instantiated). `Random` is a
+# standard library, so we skip it here.
+for pkg in ("ZMQ", "StaticArrays", "DifferentialEquations")
     if Base.find_package(pkg) === nothing
         Pkg.add(pkg)
     end
@@ -37,6 +38,7 @@ end
 using ZMQ
 using StaticArrays
 using DifferentialEquations
+using StochasticDiffEq: SOSRI
 using Random
 using Printf
 using Dates
@@ -128,7 +130,7 @@ end
 function run_simulation(; bind_addr::String = "tcp://*:5555",
                           dt_publish::Float64  = 0.01,   # 100 Hz telemetry
                           duration_s::Float64  = 600.0,
-                          rng_seed::Int        = 0xA3615)
+                          rng_seed::Integer    = 0xA3615)
 
     Random.seed!(rng_seed)
 

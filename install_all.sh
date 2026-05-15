@@ -7,7 +7,8 @@
 #     - APT toolchain      (g++-12, cmake, ninja, pkg-config, git)
 #     - libzmq + cppzmq + Eigen3 headers
 #     - Python 3.12 venv with pyzmq + numpy
-#     - Julia 1.11 packages (ZMQ, StaticArrays, DifferentialEquations, Random)
+#     - Julia (latest stable via juliaup) packages: ZMQ, StaticArrays,
+#       DifferentialEquations
 #
 #  Idempotent: re-running is safe.
 # =============================================================================
@@ -33,7 +34,6 @@ sudo apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip \
     chrony
 
-# Ensure g++-12 is the default if available (C++20 ranges, concepts).
 if command -v g++-12 >/dev/null; then
     sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 120 || true
     sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 120 || true
@@ -46,52 +46,62 @@ if [[ ! -f /usr/local/include/zmq.hpp && ! -f /usr/include/zmq.hpp ]]; then
     log "Fetching cppzmq header (zmq.hpp) ..."
     tmp="$(mktemp -d)"
     git clone --depth 1 --branch v4.10.0 https://github.com/zeromq/cppzmq.git "$tmp/cppzmq"
-    sudo install -m 0644 "$tmp/cppzmq/zmq.hpp"     /usr/local/include/zmq.hpp
-    sudo install -m 0644 "$tmp/cppzmq/zmq_addon.hpp" /usr/local/include/zmq_addon.hpp || true
+    sudo install -m 0644 "$tmp/cppzmq/zmq.hpp"        /usr/local/include/zmq.hpp
+    sudo install -m 0644 "$tmp/cppzmq/zmq_addon.hpp"  /usr/local/include/zmq_addon.hpp || true
     rm -rf "$tmp"
 else
     log "cppzmq already present, skipping."
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Julia 1.11
+# 3. Julia — use the latest stable already installed; otherwise install via juliaup
 # ---------------------------------------------------------------------------
-JULIA_BIN="$(command -v julia || true)"
-if [[ -z "$JULIA_BIN" ]] || ! julia --version | grep -q "1.11"; then
-    log "Installing Julia 1.11 via official tarball ..."
-    JULIA_VER="1.11.2"
-    JULIA_DIR="/opt/julia-${JULIA_VER}"
-    if [[ ! -d "$JULIA_DIR" ]]; then
-        tmp="$(mktemp -d)"
-        curl -fsSL "https://julialang-s3.julialang.org/bin/linux/x64/1.11/julia-${JULIA_VER}-linux-x86_64.tar.gz" \
-             -o "$tmp/julia.tar.gz"
-        sudo tar -C /opt -xzf "$tmp/julia.tar.gz"
-        rm -rf "$tmp"
-    fi
-    sudo ln -sf "${JULIA_DIR}/bin/julia" /usr/local/bin/julia
+# Make sure juliaup-managed binaries are visible even in non-interactive shells.
+if [[ -d "$HOME/.juliaup/bin" ]]; then
+    export PATH="$HOME/.juliaup/bin:$PATH"
 fi
-log "Julia: $(julia --version)"
 
+if ! command -v julia >/dev/null 2>&1; then
+    log "No Julia found on PATH — installing juliaup (latest stable channel) ..."
+    curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel release
+    export PATH="$HOME/.juliaup/bin:$PATH"
+fi
+
+command -v julia >/dev/null 2>&1 \
+    || die "Julia installation failed; install manually from https://julialang.org/downloads/"
+
+# If juliaup is present, ensure 'release' channel is current and set as default.
+if command -v juliaup >/dev/null 2>&1; then
+    log "Updating juliaup 'release' channel to latest stable ..."
+    juliaup update release  || true
+    juliaup default release || true
+fi
+
+log "Using $(julia --version) at $(command -v julia)"
+
+# ---------------------------------------------------------------------------
+# 4. Julia packages — instantiate a project under simulation_engine/
+# ---------------------------------------------------------------------------
 log "Installing Julia packages (this can take several minutes the first time) ..."
-julia --project="$ROOT/simulation_engine" -e '
+julia --project="$ROOT/simulation_engine" --color=yes -e '
     using Pkg
-    Pkg.add(["ZMQ", "StaticArrays", "DifferentialEquations", "Random"])
+    Pkg.add(["ZMQ", "StaticArrays", "DifferentialEquations", "StochasticDiffEq"])
     Pkg.precompile()
 '
 
 # ---------------------------------------------------------------------------
-# 4. Python 3.12 virtualenv
+# 5. Python 3.12 virtualenv
 # ---------------------------------------------------------------------------
 log "Creating Python 3.12 venv at $ROOT/.venv ..."
 python3.12 -m venv "$ROOT/.venv"
 # shellcheck disable=SC1091
 source "$ROOT/.venv/bin/activate"
-pip install --upgrade pip wheel
-pip install "pyzmq>=25" "numpy>=1.26"
+pip install --quiet --upgrade pip wheel
+pip install --quiet "pyzmq>=25" "numpy>=1.26"
 deactivate
 
 # ---------------------------------------------------------------------------
-# 5. Build the C++ tracker
+# 6. Build the C++ tracker
 # ---------------------------------------------------------------------------
 log "Configuring & building tracking_system (Release / -O3 -march=native) ..."
 cmake -S "$ROOT/tracking_system" -B "$ROOT/tracking_system/build" \
@@ -99,7 +109,7 @@ cmake -S "$ROOT/tracking_system" -B "$ROOT/tracking_system/build" \
 cmake --build "$ROOT/tracking_system/build" --parallel
 
 # ---------------------------------------------------------------------------
-# 6. Optional: enable CLOCK_TAI offset (chrony) — see README clock-sync section
+# 7. Chrony hint (CLOCK_TAI requires kernel offset set)
 # ---------------------------------------------------------------------------
 if ! systemctl is-active --quiet chrony 2>/dev/null; then
     warn "chrony is installed but not active under WSL2 systemd; CLOCK_TAI"
@@ -110,6 +120,10 @@ cat <<EOF
 
 ------------------------------------------------------------------------
   AEGIS-LINK environment ready.
+
+  Julia : $(julia --version)
+  Python: $("$ROOT/.venv/bin/python" --version)
+  C++   : $(g++ --version | head -n1)
 
   Run order (3 separate terminals):
 

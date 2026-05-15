@@ -22,7 +22,7 @@
 | Path                             | Role                                                     | Lang     |
 |----------------------------------|----------------------------------------------------------|----------|
 | [shared/messages.h](shared/messages.h)                       | C-ABI 128-B `TrackPacket` (cache-aligned, no padding) | C/C++  |
-| [simulation_engine/main.jl](simulation_engine/main.jl)       | SDE physics with coloured (OU) wind noise             | Julia 1.11 |
+| [simulation_engine/main.jl](simulation_engine/main.jl)       | SDE physics with coloured (OU) wind noise             | Julia ≥ 1.11 (tested on 1.12) |
 | [tracking_system/main.cpp](tracking_system/main.cpp)         | EKF with closed-form CA discretisation                | C++20  |
 | [tracking_system/CMakeLists.txt](tracking_system/CMakeLists.txt) | CMake build, `-O3 -march=native`                  | CMake  |
 | [ai_orchestrator/main.py](ai_orchestrator/main.py)           | Real-time Mahalanobis distance / manoeuvre flag       | Python 3.12 |

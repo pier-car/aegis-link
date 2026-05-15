@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/pierc/projects/AEGIS-LINK/tracking_system/build",
+  "command": "/usr/bin/c++ -DEIGEN_DONT_PARALLELIZE -DEIGEN_NO_DEBUG -I/home/pierc/projects/AEGIS-LINK/tracking_system/.. -isystem /usr/include/eigen3 -isystem /usr/include/pgm-5.3 -isystem /usr/include/libxml2 -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion -O3 -march=native -mtune=native -DNDEBUG -fno-plt -isystem /usr/include/mit-krb5 -o CMakeFiles/aegis_tracker.dir/main.cpp.o -c /home/pierc/projects/AEGIS-LINK/tracking_system/main.cpp",
+  "file": "/home/pierc/projects/AEGIS-LINK/tracking_system/main.cpp",
+  "output": "CMakeFiles/aegis_tracker.dir/main.cpp.o"
+}
+]
