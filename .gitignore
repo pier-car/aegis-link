@@ -1,0 +1,50 @@
+# =============================================================================
+#  AEGIS-LINK :: .gitignore
+# =============================================================================
+
+# --- Python ------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- C++ / CMake -------------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+*.o
+*.obj
+*.so
+*.a
+*.dylib
+*.exe
+
+# --- Julia -------------------------------------------------------------------
+# Keep Project.toml, ignore Manifest.toml so different Julia versions resolve
+# their own dependency graph (recommended for application repos).
+**/Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.julia/
+
+# --- Editors / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Run artefacts -----------------------------------------------------------
+run.csv
+*.log
+/tmp_*/
