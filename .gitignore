@@ -53,9 +53,8 @@ run.csv
 GUIDE_LOCAL.md
 NOTES_LOCAL.*
 *.local.md
-run_demo.sh
-analysis.ipynb
-viz_live.py
+
+# --- Run artefacts produced by run_demo.sh / analysis.ipynb ------------------
 logs/
 replay.gif
 replay.mp4
