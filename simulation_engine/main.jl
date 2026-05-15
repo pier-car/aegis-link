@@ -142,10 +142,12 @@ function run_simulation(; bind_addr::String = "tcp://*:5555",
     ZMQ.bind(sock, bind_addr)
     @info "AEGIS-LINK simulator publishing on $bind_addr"
 
-    # --- Initial conditions: drone @ 1 km altitude, 50 m/s eastbound ------
-    u0 = [ 0.0, 0.0, 1000.0,    # r_x r_y r_z
-          50.0, 0.0,    0.0,    # v_x v_y v_z
-           0.0, 0.0,    0.0 ]   # W_x W_y W_z
+    # --- Initial conditions: ballistic launch from ground level ----------
+    # Eastbound 50 m/s + vertical 250 m/s -> apogee ~ 3.2 km at t~25 s,
+    # ground impact at t~51 s (sqrt(2*z/g)*2). Gives a clean arc to track.
+    u0 = [ 0.0, 0.0,   10.0,    # r_x r_y r_z   (10 m off the ground to avoid t=0 trigger)
+          50.0, 0.0,  250.0,    # v_x v_y v_z
+           0.0, 0.0,    0.0 ]   # W_x W_y W_z (OU wind, starts at 0)
 
     params = SimParams(
         0.5,                          # theta  -> tau = 2 s (typical gust scale)
@@ -178,6 +180,20 @@ function run_simulation(; bind_addr::String = "tcp://*:5555",
             step!(integ, dt_publish, true)            # advance exactly dt_publish
             u = integ.u
             state6 = SVector(u[1], u[2], u[3], u[4], u[5], u[6])
+
+            # Ground-impact termination: the dynamics are pure ballistic with
+            # a_z = -g, so without this the drone keeps "falling" through the
+            # floor (z << 0) and the visualisation autoscales to the resulting
+            # 17 km plunge, hiding the actual airborne phase.
+            if u[3] <= 0.0
+                @info "Ground impact at t=$(round(integ.t, digits=2))s, " *
+                      "horiz=($(round(u[1],digits=1)), $(round(u[2],digits=1))) m"
+                pkt_id += UInt32(1)
+                ts_ns = UInt64(round(time() * 1e9)) + UInt64(37) * UInt64(1_000_000_000)
+                pack_track_packet!(buf, pkt_id, ts_ns, state6, cov_truth)
+                ZMQ.send(sock, buf)
+                break
+            end
 
             # CLOCK_TAI ≈ CLOCK_REALTIME + 37 s (leap seconds offset, see README).
             ts_ns = UInt64(round(time() * 1e9)) + UInt64(37) * UInt64(1_000_000_000)
