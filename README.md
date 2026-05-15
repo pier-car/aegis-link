@@ -14,6 +14,16 @@ glued by a **128-byte zero-copy data link** over ZeroMQ.*
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python)]()
 [![ZeroMQ](https://img.shields.io/badge/transport-ZeroMQ-DF0000)]()
 
+<br/>
+
+<img src="docs/img/hero.png" alt="AEGIS-LINK hero: 3D ballistic trajectory tracked by EKF, with residual error and Mahalanobis distance" width="92%"/>
+
+<sub><i>Julia simulates a noisy ballistic launch · C++ EKF reconstructs the state at ~100 Hz · Python flags anomalies via χ² gating on the innovation.</i></sub>
+
+<br/><br/>
+
+<img src="docs/img/demo.gif" alt="AEGIS-LINK live demo: tactical view of true vs estimated trajectory" width="80%"/>
+
 </div>
 
 ---

@@ -48,6 +48,11 @@ Thumbs.db
 run.csv
 *.log
 /tmp_*/
+*.png
+*.gif
+# Keep curated documentation assets
+!docs/img/*.png
+!docs/img/*.gif
 
 # --- Local notes (not for the repo) ------------------------------------------
 GUIDE_LOCAL.md
@@ -58,5 +63,6 @@ NOTES_LOCAL.*
 logs/
 replay.gif
 replay.mp4
-*.png
+!docs/img/*.png
+!docs/img/*.gif
 
