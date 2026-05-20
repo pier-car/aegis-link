@@ -4,9 +4,10 @@
 # -----------------------------------------------------------------------------
 #  Orchestratore "one-click" per la prima esecuzione.
 #  Avvia in sequenza:
-#     1) Julia simulator   (background, log -> logs/sim.log)
-#     2) C++ EKF tracker   (background, log -> logs/trk.log)
-#     3) Python analyzer   (foreground, CSV -> run.csv)
+#     1) Julia simulator       (background, log -> logs/sim.log)
+#     2) C++ EKF tracker       (background, log -> logs/trk.log)
+#     3) Python analyzer       (background, CSV -> run.csv)
+#     4) Python engagement     (background, CSV -> engagement.csv)
 #
 #  Si ferma da solo dopo DURATION secondi (default 30) e fa stop pulito di
 #  tutti i processi figli.
@@ -81,6 +82,25 @@ rm -f "$ROOT/run.csv"
 ORCH_PID=$!
 PIDS+=("$ORCH_PID")
 
+# --- 4) Engagement engine Python (SUB :5555 + :5556 / PUB :5557) --------
+log "Avvio engagement engine (PN interceptor, CSV -> engagement.csv)..."
+rm -f "$ROOT/engagement.csv"
+( "$ROOT/.venv/bin/python" "$ROOT/engagement_engine/main.py" \
+        --config "$ROOT/engagement_engine/config.yaml" \
+        --duration "$DURATION" \
+    > "$ROOT/engagement.csv" 2> "$ROOT/logs/engage.err" ) &
+PIDS+=("$!")
+
+# Attesa breve per il bind di :5557 (utile a viz_live).
+WAIT=0
+while ! ss -tnl 2>/dev/null | grep -q ':5557 '; do
+    sleep 1; ((WAIT++)) || true
+    if (( WAIT > 10 )); then
+        warn "Engagement engine non lega :5557 entro 10s. Continuo lo stesso."
+        break
+    fi
+done
+
 # --- Watchdog ------------------------------------------------------------
 log "Simulazione in corso... (Ctrl-C per interrompere prima)"
 SECS=0
@@ -89,7 +109,9 @@ while (( SECS < DURATION )); do
     # Heartbeat ogni 5 s
     if (( SECS % 5 == 0 )); then
         N=$(( $(wc -l < "$ROOT/run.csv" 2>/dev/null || echo 0) ))
-        printf "${c_grn}[demo]${c_off}  t=%3ds  righe CSV=%d\n" "$SECS" "$N"
+        E=$(( $(wc -l < "$ROOT/engagement.csv" 2>/dev/null || echo 0) ))
+        printf "${c_grn}[demo]${c_off}  t=%3ds  righe run.csv=%d  engagement.csv=%d\n" \
+               "$SECS" "$N" "$E"
     fi
     # Sanity: se qualcuno è morto, esci
     for pid in "${PIDS[@]}"; do
@@ -104,22 +126,30 @@ log "Tempo scaduto, chiusura..."
 sleep 1
 N_LINES=$(wc -l < "$ROOT/run.csv" 2>/dev/null || echo 0)
 SIZE=$(du -h "$ROOT/run.csv" 2>/dev/null | cut -f1)
+E_LINES=$(wc -l < "$ROOT/engagement.csv" 2>/dev/null || echo 0)
+E_SIZE=$(du -h "$ROOT/engagement.csv" 2>/dev/null | cut -f1)
 
 cat <<EOF
 
 ------------------------------------------------------------------------
   ✅ Run completata.
 
-  CSV       : run.csv   ($N_LINES righe, $SIZE)
-  Log sim   : logs/sim.log
-  Log trk   : logs/trk.log
-  Log orch  : logs/orch.err
+  CSV tracker    : run.csv         ($N_LINES righe, $SIZE)
+  CSV engagement : engagement.csv  ($E_LINES righe, $E_SIZE)
+  Log sim        : logs/sim.log
+  Log trk        : logs/trk.log
+  Log orch       : logs/orch.err
+  Log engage     : logs/engage.err
 
   Prossimo passo (analisi grafica):
 
       source .venv/bin/activate
       pip install --quiet matplotlib pandas jupyterlab seaborn
       jupyter lab analysis.ipynb     # oppure aprilo da VS Code
+
+  Per il batch Monte-Carlo (N engagements, Pk + miss-distance):
+
+      ./mc_demo.sh 20               # 20 engagement (default 10)
 
 ------------------------------------------------------------------------
 EOF

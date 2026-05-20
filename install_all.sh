@@ -97,7 +97,7 @@ python3.12 -m venv "$ROOT/.venv"
 # shellcheck disable=SC1091
 source "$ROOT/.venv/bin/activate"
 pip install --quiet --upgrade pip wheel
-pip install --quiet "pyzmq>=25" "numpy>=1.26"
+pip install --quiet "pyzmq>=25" "numpy>=1.26" "pyyaml>=6.0"
 deactivate
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 AEGIS-LINK :: ai_orchestrator/main.py
 =====================================
 
-Real-time anomaly / manoeuvre detector.
+Real-time anomaly / manoeuvre detector **and fire-control lock manager**.
 
 Subscribes to:
   * tcp://127.0.0.1:5555  -> ground truth from the Julia simulator
@@ -25,6 +25,22 @@ where:
 A target is flagged as MANEUVERING when d^2 exceeds the chi-square
 99% gate for k=6 degrees of freedom (~16.81). A short consecutive
 streak filter (default = 3) suppresses single-frame outliers.
+
+Fire-control lock state machine
+-------------------------------
+
+On top of the anomaly detector, the orchestrator runs a small lock FSM:
+
+    SEARCH ──(trk in gate, sigma_p < LOCK_SIGMA_M for LOCK_STREAK frames)──▶ TRACKING
+    TRACKING ──(same criteria continue to hold for LOCK_HOLD frames)──────▶ LOCKED
+
+A `LOCKED` state raises `AEGIS_FLAG_LOCKED` on the orchestrator's CSV
+output and on stderr; the downstream `engagement_engine` watches for
+that transition on the same EKF stream and decides whether to launch
+an interceptor. Lock is dropped (back to SEARCH) on any of:
+  * MAX_OUT_OF_GATE consecutive out-of-gate frames,
+  * sigma_p doubling above the lock threshold,
+  * a 200 ms gap in incoming estimates.
 
 The script also writes one line per fused sample to stdout in CSV
 form for offline analysis (pandas, matplotlib, etc.).
@@ -88,6 +104,11 @@ class TrackPacket:
 PRODUCER_SIM      = 1
 PRODUCER_TRACKER  = 2
 
+# Flag bits (mirror shared/messages.h::AegisFlags).
+FLAG_MANEUVER = 0x0001
+FLAG_LOST_TRK = 0x0002
+FLAG_LOCKED   = 0x0004
+
 # Sensor-side noise floor (matches tracker assumptions). Position 5 cm,
 # velocity 20 cm/s — Pirelli-style metrology lineage.
 R_DIAG = np.array([0.05**2]*3 + [0.20**2]*3, dtype=np.float64)
@@ -98,6 +119,23 @@ STREAK_FOR_ALERT = 3
 
 # Maximum age of a buffered truth packet before we give up matching it.
 MAX_MATCH_LAG_NS = 50_000_000  # 50 ms
+
+# ---------------------------------------------------------------------------
+#  Fire-control lock state machine
+# ---------------------------------------------------------------------------
+# Lock is acquired when the EKF position 1-sigma magnitude is below
+# LOCK_SIGMA_M for LOCK_STREAK consecutive in-gate frames; lock is held
+# through TRACKING -> LOCKED after LOCK_HOLD additional frames.
+LOCK_SIGMA_M     = 5.0    # meters (1-sigma on |position|)
+LOCK_STREAK      = 25     # ~250 ms at 100 Hz
+LOCK_HOLD        = 50     # ~500 ms additional dwell before promotion
+MAX_OUT_OF_GATE  = 5      # frames out-of-gate that drop the lock
+
+LOCK_SEARCH   = 0
+LOCK_TRACKING = 1
+LOCK_LOCKED   = 2
+
+_LOCK_NAME = {LOCK_SEARCH: "SEARCH", LOCK_TRACKING: "TRACKING", LOCK_LOCKED: "LOCKED"}
 
 
 def mahalanobis_sq(delta: np.ndarray, cov_diag: np.ndarray) -> float:
@@ -137,7 +175,14 @@ def run(sim_addr: str = "tcp://127.0.0.1:5555",
     streak = 0
     n_total = n_alert = 0
 
-    print("ts_ns,packet_id,d2,maneuver,px,py,pz,ex,ey,ez", flush=True)
+    # Lock FSM state.
+    lock_state    = LOCK_SEARCH
+    in_gate_run   = 0  # consecutive in-gate frames with sigma_p < LOCK_SIGMA_M
+    out_of_gate   = 0  # consecutive out-of-gate frames (for lock drop)
+    last_est_ns: Optional[int] = None
+
+    print("ts_ns,packet_id,d2,maneuver,lock_state,sigma_p,"
+          "px,py,pz,ex,ey,ez", flush=True)
 
     running = True
     def _stop(signum, frame):
@@ -165,6 +210,17 @@ def run(sim_addr: str = "tcp://127.0.0.1:5555",
             if est.schema_version != SCHEMA_V or est.producer_id != PRODUCER_TRACKER:
                 continue
 
+            # Drop lock on a long gap in incoming estimates (>200 ms).
+            if last_est_ns is not None and \
+               (int(est.timestamp_ns) - last_est_ns) > 200_000_000:
+                if lock_state != LOCK_SEARCH:
+                    print(f"[orch] lock DROPPED (estimate gap > 200ms)",
+                          file=sys.stderr, flush=True)
+                lock_state  = LOCK_SEARCH
+                in_gate_run = 0
+                out_of_gate = 0
+            last_est_ns = int(est.timestamp_ns)
+
             # Match: nearest-in-time truth packet, bounded by MAX_MATCH_LAG_NS.
             truth = _match(est, truth_buf)
             if truth is None:
@@ -182,8 +238,35 @@ def run(sim_addr: str = "tcp://127.0.0.1:5555",
             if confirmed:
                 n_alert += 1
 
+            # --- Lock FSM update -----------------------------------------
+            sigma_p = float(np.sqrt(max(np.sum(est.cov_diag[0:3]), 0.0)))
+            lock_ok = (not is_alert) and (sigma_p < LOCK_SIGMA_M)
+            if lock_ok:
+                in_gate_run += 1
+                out_of_gate  = 0
+                if lock_state == LOCK_SEARCH and in_gate_run >= LOCK_STREAK:
+                    lock_state = LOCK_TRACKING
+                    print(f"[orch] lock state -> TRACKING (sigma_p={sigma_p:.2f} m)",
+                          file=sys.stderr, flush=True)
+                elif lock_state == LOCK_TRACKING and \
+                        in_gate_run >= (LOCK_STREAK + LOCK_HOLD):
+                    lock_state = LOCK_LOCKED
+                    print(f"[orch] lock state -> LOCKED  (sigma_p={sigma_p:.2f} m)",
+                          file=sys.stderr, flush=True)
+            else:
+                out_of_gate += 1
+                if out_of_gate >= MAX_OUT_OF_GATE and lock_state != LOCK_SEARCH:
+                    print(f"[orch] lock DROPPED -> SEARCH "
+                          f"(out_of_gate={out_of_gate}, sigma_p={sigma_p:.2f})",
+                          file=sys.stderr, flush=True)
+                    lock_state  = LOCK_SEARCH
+                    in_gate_run = 0
+                # Hard drop if sigma exploded.
+                if sigma_p > 2.0 * LOCK_SIGMA_M:
+                    in_gate_run = 0
+
             print(f"{est.timestamp_ns},{est.packet_id},{d2:.4f},"
-                  f"{int(confirmed)},"
+                  f"{int(confirmed)},{lock_state},{sigma_p:.4f},"
                   f"{truth.state[0]:.3f},{truth.state[1]:.3f},{truth.state[2]:.3f},"
                   f"{est.state[0]:.3f},{est.state[1]:.3f},{est.state[2]:.3f}",
                   flush=True)
@@ -194,7 +277,8 @@ def run(sim_addr: str = "tcp://127.0.0.1:5555",
                       f"streak={streak}  pkt={est.packet_id}",
                       file=sys.stderr, flush=True)
 
-    print(f"[orch] done. samples={n_total} alerts={n_alert}", file=sys.stderr)
+    print(f"[orch] done. samples={n_total} alerts={n_alert} "
+          f"final_lock={_LOCK_NAME[lock_state]}", file=sys.stderr)
 
 
 def _match(est: TrackPacket,

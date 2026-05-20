@@ -28,10 +28,31 @@
  *       16     48     state[6]             (x,y,z, vx,vy,vz)            [m, m/s]
  *       64     48     cov_diag[6]          (sigma^2 of the 6 state comps)
  *      112      2     schema_version       (bump on breaking changes)
- *      114      2     flags                (bit 0 = MANEUVER, bit 1 = LOST_TRK)
+ *      114      2     flags                (see AegisFlags enum)
  *      116     12     _padding             (to reach 128B / 2 cache lines)
  *      ------  ----
  *      total  128
+ *
+ *  -----------------------------------------------------------------------------
+ *  Fire-control upgrade (schema_version == 1, byte-compatible):
+ *
+ *    A second 128-byte message type, `EngagementPacket`, is published by the
+ *    Python `engagement_engine` process on `tcp://*:5557`. It mirrors
+ *    `TrackPacket`'s layout (same offsets for id/timestamp/state/cov/flags)
+ *    so that subscribers can sniff either stream with the same struct
+ *    unpack format. The semantic mapping is:
+ *
+ *      state[0..3]   = interceptor position  [m]
+ *      state[3..6]   = interceptor velocity  [m/s]
+ *      cov_diag[0]   = time-to-go             [s]
+ *      cov_diag[1]   = predicted miss-distance at intercept [m]
+ *      cov_diag[2]   = current LOS range to estimated target [m]
+ *      cov_diag[3]   = closing speed          [m/s]
+ *      cov_diag[4]   = remaining fuel fraction in [0,1]
+ *      cov_diag[5]   = commanded lateral acceleration magnitude [m/s^2]
+ *
+ *    The `flags` field carries the fire-control state-machine bits
+ *    (LOCKED / ENGAGED / KILL / MISS) defined in `AegisFlags` below.
  *
  * ============================================================================= */
 #ifndef AEGIS_LINK_MESSAGES_H
@@ -61,7 +82,8 @@ extern "C" {
 enum AegisProducer {
     AEGIS_PRODUCER_SIMULATOR    = 1u,
     AEGIS_PRODUCER_TRACKER      = 2u,
-    AEGIS_PRODUCER_ORCHESTRATOR = 3u
+    AEGIS_PRODUCER_ORCHESTRATOR = 3u,
+    AEGIS_PRODUCER_INTERCEPTOR  = 4u   /* fire-control / PN guidance engine    */
 };
 
 /* Bit flags. */
@@ -69,6 +91,10 @@ enum AegisFlags {
     AEGIS_FLAG_NONE      = 0x0000u,
     AEGIS_FLAG_MANEUVER  = 0x0001u,  /* anomaly score above gate              */
     AEGIS_FLAG_LOST_TRK  = 0x0002u,  /* tracker has lost lock                 */
+    AEGIS_FLAG_LOCKED    = 0x0004u,  /* fire-control lock acquired on track   */
+    AEGIS_FLAG_ENGAGED   = 0x0008u,  /* interceptor launched, PN guidance live*/
+    AEGIS_FLAG_KILL      = 0x0010u,  /* miss-distance < lethal radius         */
+    AEGIS_FLAG_MISS      = 0x0020u,  /* engagement ended without a kill       */
     AEGIS_FLAG_TEST      = 0x8000u   /* synthetic / test packet (do not act)  */
 };
 
@@ -103,6 +129,22 @@ AEGIS_STATIC_ASSERT(offsetof(TrackPacket, cov_diag)       ==  64, "off cov");
 AEGIS_STATIC_ASSERT(offsetof(TrackPacket, schema_version) == 112, "off sv");
 AEGIS_STATIC_ASSERT(offsetof(TrackPacket, flags)          == 114, "off flags");
 #endif
+
+/* -------------------------------------------------------------------------
+ *  EngagementPacket — fire-control / interceptor telemetry.
+ *
+ *  Identical 128-byte layout as TrackPacket (same offsets and types) so that
+ *  every existing subscriber can decode it with the same struct format.
+ *  The semantic meaning of `state[]` and `cov_diag[]` differs (see the
+ *  header comment at the top of this file).
+ *
+ *  Producer:  AEGIS_PRODUCER_INTERCEPTOR (4)
+ *  Endpoint:  tcp://*:5557 (PUB)
+ * ------------------------------------------------------------------------- */
+typedef TrackPacket EngagementPacket;
+
+AEGIS_STATIC_ASSERT(sizeof(EngagementPacket) == 128,
+                    "EngagementPacket must be exactly 128 bytes");
 
 #if defined(__cplusplus)
 } /* extern "C" */

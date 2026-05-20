@@ -76,12 +76,18 @@ _PKT_FMT  = "<IIQ6d6dHH12s"
 _PKT_SIZE = struct.calcsize(_PKT_FMT)
 assert _PKT_SIZE == 128
 
-PROD_SIM     = 1
-PROD_TRACKER = 2
+PROD_SIM         = 1
+PROD_TRACKER     = 2
+PROD_INTERCEPTOR = 4
 FLAG_MANEUVER = 0x0001
+FLAG_LOCKED   = 0x0004
+FLAG_ENGAGED  = 0x0008
+FLAG_KILL     = 0x0010
+FLAG_MISS     = 0x0020
 
-ENDPOINT_TRUTH    = "tcp://127.0.0.1:5555"
-ENDPOINT_ESTIMATE = "tcp://127.0.0.1:5556"
+ENDPOINT_TRUTH      = "tcp://127.0.0.1:5555"
+ENDPOINT_ESTIMATE   = "tcp://127.0.0.1:5556"
+ENDPOINT_ENGAGEMENT = "tcp://127.0.0.1:5557"
 
 
 @dataclass
@@ -153,11 +159,15 @@ class _Stream:
 # --------------------------------------------------------------------------
 #  "Tactical" matplotlib styling
 # --------------------------------------------------------------------------
-TRUTH_COLOR    = "#00ff9a"   # neon green
-ESTIMATE_COLOR = "#ffb000"   # amber
-GRID_COLOR     = "#1f3a3a"
-ALERT_COLOR    = "#ff2e63"
-TEXT_COLOR     = "#9bd1d1"
+TRUTH_COLOR       = "#00ff9a"   # neon green
+ESTIMATE_COLOR    = "#ffb000"   # amber
+INTERCEPTOR_COLOR = "#00d9ff"   # cyan
+LOS_COLOR         = "#ff66cc"   # magenta (LOS line interceptor->target)
+GRID_COLOR        = "#1f3a3a"
+ALERT_COLOR       = "#ff2e63"
+LOCK_COLOR        = "#ffe14a"
+KILL_COLOR        = "#ff2e63"
+TEXT_COLOR        = "#9bd1d1"
 
 def _setup_style():
     plt.rcParams.update({
@@ -187,6 +197,7 @@ class LiveViewer:
 
         self.truth = _Stream(ENDPOINT_TRUTH)
         self.est   = _Stream(ENDPOINT_ESTIMATE)
+        self.intc  = _Stream(ENDPOINT_ENGAGEMENT)
 
         _setup_style()
         self.fig = plt.figure(figsize=(13, 7.5), num="AEGIS-LINK :: live")
@@ -231,8 +242,14 @@ class LiveViewer:
                                            lw=1.4, label="truth")
         self._est_line,   = self.ax3d.plot([], [], [], color=ESTIMATE_COLOR,
                                            lw=1.0, alpha=0.95, label="EKF")
+        self._intc_line,  = self.ax3d.plot([], [], [], color=INTERCEPTOR_COLOR,
+                                           lw=1.2, alpha=0.95, label="interceptor")
+        self._los_line,   = self.ax3d.plot([], [], [], color=LOS_COLOR,
+                                           lw=0.7, ls=":", alpha=0.6)
         self._truth_head  = self.ax3d.scatter([], [], [], c=TRUTH_COLOR, s=35)
         self._est_head    = self.ax3d.scatter([], [], [], c=ESTIMATE_COLOR, s=18)
+        self._intc_head   = self.ax3d.scatter([], [], [], c=INTERCEPTOR_COLOR, s=30,
+                                              marker="^")
         self._sigma_surf  = None  # rebuilt each frame
 
         self.ax3d.legend(loc="upper right", framealpha=0.0,
@@ -303,7 +320,24 @@ class LiveViewer:
         else:
             ep = np.empty((0, 3))
 
-        all_pts = np.vstack([tp, ep]) if (tp.size or ep.size) else np.empty((0, 3))
+        if self.intc.buf:
+            ip = np.array([s.pos for s in self.intc.buf])
+            self._intc_line.set_data_3d(ip[:, 0], ip[:, 1], ip[:, 2])
+            self._intc_head._offsets3d = ([ip[-1, 0]], [ip[-1, 1]], [ip[-1, 2]])
+            # LOS line from current interceptor pos to current EKF estimate.
+            if self.est.last is not None:
+                self._los_line.set_data_3d(
+                    [ip[-1, 0], self.est.last.pos[0]],
+                    [ip[-1, 1], self.est.last.pos[1]],
+                    [ip[-1, 2], self.est.last.pos[2]])
+            else:
+                self._los_line.set_data_3d([], [], [])
+        else:
+            ip = np.empty((0, 3))
+            self._los_line.set_data_3d([], [], [])
+
+        all_pts = np.vstack([tp, ep, ip]) if (tp.size or ep.size or ip.size) \
+            else np.empty((0, 3))
         self._autorange_3d(all_pts)
 
         # 3-sigma sphere on latest estimate
@@ -361,16 +395,47 @@ class LiveViewer:
             sigma_pos = float(np.sqrt(np.sum(self.est.last.cov_diag[0:3])))
             n_t = len(self.truth.buf)
             n_e = len(self.est.buf)
+
+            # Determine fire-control state from interceptor stream.
+            fc_state = "SEARCHING"
+            fc_color = TEXT_COLOR
+            i_flags  = self.intc.last.flags if self.intc.last is not None else 0
+            if i_flags & FLAG_KILL:
+                fc_state, fc_color = "** KILL **",   KILL_COLOR
+            elif i_flags & FLAG_MISS:
+                fc_state, fc_color = "MISS",         ALERT_COLOR
+            elif i_flags & FLAG_ENGAGED:
+                fc_state, fc_color = "ENGAGED",      INTERCEPTOR_COLOR
+            elif i_flags & FLAG_LOCKED:
+                fc_state, fc_color = "LOCKED",       LOCK_COLOR
+            elif self.est.last.flags & FLAG_LOCKED:
+                fc_state, fc_color = "LOCKED",       LOCK_COLOR
+
+            hud_extra = ""
+            if self.intc.last is not None and (i_flags & FLAG_ENGAGED):
+                # cov_diag[0]=tgo, cov_diag[1]=pred_miss, cov_diag[2]=range
+                tgo  = float(self.intc.last.cov_diag[0])
+                pmis = float(self.intc.last.cov_diag[1])
+                rng  = float(self.intc.last.cov_diag[2])
+                hud_extra = (f"   rng {rng:6.1f} m   "
+                             f"t_go {tgo:5.2f} s   "
+                             f"pred_miss {pmis:5.2f} m")
+
             self.hud.set_text(
                 f"AEGIS-LINK / TACTICAL  ::  "
                 f"truth pkts {n_t:5d}   est pkts {n_e:5d}   "
                 f"|v| {spd:6.1f} m/s   |err| {err_now*1000:7.1f} mm   "
-                f"sigma_p {sigma_pos*1000:7.1f} mm")
+                f"sigma_p {sigma_pos*1000:7.1f} mm{hud_extra}")
 
+            banner_parts = []
             if self.est.last.flags & FLAG_MANEUVER:
-                self.alert_box.set_text("** MANEUVER DETECTED **")
-            else:
-                self.alert_box.set_text("")
+                banner_parts.append("** MANEUVER DETECTED **")
+            banner_parts.append(f"FC: {fc_state}")
+            self.alert_box.set_text("   ".join(banner_parts))
+            self.alert_box.set_color(fc_color
+                                     if "KILL" in fc_state or "MISS" in fc_state
+                                     or "LOCKED" in fc_state or "ENGAGED" in fc_state
+                                     else ALERT_COLOR)
         else:
             self.hud.set_text("AEGIS-LINK / TACTICAL  ::  awaiting telemetry...")
 
@@ -380,11 +445,13 @@ class LiveViewer:
     def _shutdown(self, *_):
         self.truth.stop()
         self.est.stop()
+        self.intc.stop()
         plt.close(self.fig)
 
     def run(self):
         self.truth.start()
         self.est.start()
+        self.intc.start()
         interval_ms = int(1000 / self.fps)
         # cache_frame_data=False because we render off live deques
         self._anim = animation.FuncAnimation(
@@ -398,8 +465,9 @@ class LiveViewer:
 
 def main():
     print("AEGIS-LINK live viewer")
-    print(f"  truth   <- {ENDPOINT_TRUTH}")
-    print(f"  estimate<- {ENDPOINT_ESTIMATE}")
+    print(f"  truth      <- {ENDPOINT_TRUTH}")
+    print(f"  estimate   <- {ENDPOINT_ESTIMATE}")
+    print(f"  interceptor<- {ENDPOINT_ENGAGEMENT}")
     print("  close the window or Ctrl+C to quit.")
     LiveViewer(history_s=30.0, fps=30).run()
     return 0
