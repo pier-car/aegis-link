@@ -16,13 +16,13 @@ glued by a **128-byte zero-copy data link** over ZeroMQ.*
 
 <br/>
 
-<img src="docs/img/hero.png" alt="AEGIS-LINK hero: 3D ballistic trajectory tracked by EKF, with residual error and Mahalanobis distance" width="92%"/>
+<img src="docs/img/hero.png" alt="AEGIS-LINK hero: 3D scene of truth (green), EKF estimate (amber) and PN interceptor (cyan) with LOS, plus LOCKED/ENGAGED shading and KILL marker on the error and Mahalanobis-distance panels" width="92%"/>
 
-<sub><i>Julia simulates a noisy ballistic launch · C++ EKF reconstructs the state at ~100 Hz · Python flags anomalies via χ² gating on the innovation.</i></sub>
+<sub><i>Julia simulates a noisy ballistic launch · C++ EKF reconstructs the state at ~100 Hz · Python orchestrator gates anomalies via χ² and drives the lock FSM · Python PN interceptor closes the fire-control loop (track → lock → engage → knock-down).</i></sub>
 
 <br/><br/>
 
-<img src="docs/img/demo.gif" alt="AEGIS-LINK live demo: tactical view of true vs estimated trajectory" width="80%"/>
+<img src="docs/img/demo.gif" alt="AEGIS-LINK live demo: animated replay of truth, EKF estimate and PN interceptor with LOS line and fire-control state banner (SEARCHING / LOCKED / ENGAGED / KILL)" width="80%"/>
 
 </div>
 
