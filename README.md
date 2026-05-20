@@ -64,24 +64,31 @@ during a technical interview.
 │  SDE: ballistic + OU wind│   raw 128-byte frames  │  EKF, CA model, χ² gate  │
 │  100 Hz wall-paced       │     (zero-copy)        │  Joseph-form update      │
 └──────────────────────────┘                        └────────────┬─────────────┘
-                                                                 │ PUB tcp://*:5556
-                                                                 ▼
-                                                ┌──────────────────────────────┐
-                                                │ ai_orchestrator (Python 3.12)│
-                                                │  Mahalanobis d² + streak gate│
-                                                │  CSV log for analysis        │
-                                                └──────────────────────────────┘
-                                                                 │
-                                                                 ▼
-                                                ┌──────────────────────────────┐
-                                                │  viz_live.py    (live)       │
-                                                │  analysis.ipynb (post-mortem)│
-                                                └──────────────────────────────┘
+              │                                                  │ PUB tcp://*:5556
+              │                                                  ▼
+              │                                  ┌──────────────────────────────┐
+              │                                  │ ai_orchestrator (Python 3.12)│
+              │                                  │  Mahalanobis d² + streak gate│
+              │                                  │  lock FSM (SEARCH/TRK/LOCKED)│
+              │                                  │  CSV log for analysis        │
+              │                                  └────────────┬─────────────────┘
+              │                                               │
+              ▼                                               ▼
+┌──────────────────────────────┐  ◀────────────────  ┌──────────────────────────────┐
+│  viz_live.py (live tactical) │   PUB tcp://*:5557  │ engagement_engine  (Python)  │
+│  analysis.ipynb (post-mortem)│  EngagementPacket   │  PN guidance + 3-DoF intc    │
+│  shows interceptor, KILL/MISS│ ◀───────────────────│  KILL when CPA < lethal r    │
+└──────────────────────────────┘                     └──────────────────────────────┘
 ```
 
-Three asynchronous OS processes, three different runtimes, **one shared C-ABI
+Four asynchronous OS processes, three different runtimes, **one shared C-ABI
 struct**: [shared/messages.h](shared/messages.h) — 128 bytes, two cache
-lines, no padding ambiguity, identical wire layout in all three languages.
+lines, no padding ambiguity, identical wire layout in all four. The new
+`EngagementPacket` (`producer_id = 4`) is a typedef alias of `TrackPacket`:
+same offsets, same `static_assert`s, semantically reinterpreting `state[]`
+as interceptor (pos, vel) and `cov_diag[]` as fire-control telemetry
+(time-to-go, predicted miss, range, closing speed, fuel fraction,
+commanded |a|).
 
 ---
 
@@ -89,14 +96,17 @@ lines, no padding ambiguity, identical wire layout in all three languages.
 
 | Path | Role | Language / Stack |
 |---|---|---|
-| [shared/messages.h](shared/messages.h) | C-ABI 128-byte `TrackPacket`, cache-aligned, `static_assert`-checked offsets | C / C++ |
+| [shared/messages.h](shared/messages.h) | C-ABI 128-byte `TrackPacket` + `EngagementPacket` typedef, cache-aligned, `static_assert`-checked offsets | C / C++ |
 | [simulation_engine/main.jl](simulation_engine/main.jl) | SDE: ballistic dynamics + 3-D Ornstein-Uhlenbeck wind, ZMQ publisher | Julia 1.11+ (DifferentialEquations.jl, StochasticDiffEq, StaticArrays, ZMQ.jl) |
 | [tracking_system/main.cpp](tracking_system/main.cpp) | 9-D Constant-Acceleration EKF, closed-form `F(dt)` / `Q(dt)`, Joseph-form update, χ²-gated innovation | C++20 + Eigen3 + cppzmq |
 | [tracking_system/CMakeLists.txt](tracking_system/CMakeLists.txt) | Ninja build, `-O3 -march=native`, no fast-math (Kalman needs IEEE-754 monotonicity) | CMake ≥ 3.20 |
-| [ai_orchestrator/main.py](ai_orchestrator/main.py) | Real-time fusion: Mahalanobis distance + χ² gate + 3-frame streak filter, CSV writer | Python 3.12 + pyzmq + numpy |
-| [viz_live.py](viz_live.py) | Live "tactical radar" 3-D scene with 3σ ellipsoid, 30 FPS | matplotlib + pyzmq |
-| [analysis.ipynb](analysis.ipynb) | 11-section post-run notebook (sanity checks, χ² consistency test, residual stats, replay GIF, interactive Plotly scene) | Jupyter / pandas / matplotlib / plotly |
-| [run_demo.sh](run_demo.sh) | One-click orchestrator: starts the three processes, waits for the bind, writes `run.csv`, cleans up on exit | bash |
+| [ai_orchestrator/main.py](ai_orchestrator/main.py) | Real-time fusion: Mahalanobis distance + χ² gate + 3-frame streak filter + **lock FSM** (`SEARCH → TRACKING → LOCKED`), CSV writer | Python 3.12 + pyzmq + numpy |
+| [engagement_engine/main.py](engagement_engine/main.py) | **Fire-control loop**: PN guidance on the EKF estimate, 3-DoF interceptor (RK4, thrust/drag/mass-burn), KILL/MISS decisioning, publishes `EngagementPacket` on `:5557` | Python 3.12 + pyzmq + numpy + pyyaml |
+| [engagement_engine/config.yaml](engagement_engine/config.yaml) | Interceptor parameters (mass, thrust, max-G, lethal radius, N′) | YAML |
+| [viz_live.py](viz_live.py) | Live "tactical radar" 3-D scene with 3σ ellipsoid, interceptor track, LOS line, fire-control HUD, 30 FPS | matplotlib + pyzmq |
+| [analysis.ipynb](analysis.ipynb) | 12-section post-run notebook (sanity checks, χ² consistency test, residual stats, replay GIF, interactive Plotly scene, **engagement performance**) | Jupyter / pandas / matplotlib / plotly |
+| [run_demo.sh](run_demo.sh) | One-click orchestrator: starts the four processes, waits for the binds, writes `run.csv` + `engagement.csv`, cleans up on exit | bash |
+| [mc_demo.sh](mc_demo.sh) | **Monte-Carlo driver**: runs N independent engagements, aggregates Pk and miss-distance into `mc_results.csv` | bash |
 | [install_all.sh](install_all.sh) | Idempotent provisioning for WSL2 / Ubuntu 22.04+ | bash + apt + juliaup |
 
 ---
@@ -215,7 +225,7 @@ Mahalanobis distance of the innovation — out-of-gate measurements are
 *rejected* (prediction kept), so a single bad sensor frame cannot poison
 the filter.
 
-### Orchestrator — anomaly / manoeuvre detector
+### Orchestrator — anomaly / manoeuvre detector + lock FSM
 
 For each estimate-truth pair (matched by producer-side TAI timestamp
 within 50 ms), the orchestrator computes
@@ -226,6 +236,86 @@ $$d^2 = \boldsymbol{\delta}^\top S^{-1} \boldsymbol{\delta},
 A **3-frame consecutive streak** above the threshold
 $\chi^2_{6,0.99} \approx 16.81$ confirms a MANEUVER — the streak filter
 rejects single-frame outliers due to packet jitter or extreme wind gusts.
+
+On top of the anomaly detector, the orchestrator runs a small
+**fire-control lock state machine**:
+
+```
+SEARCH ──(in-gate AND σ_p < 5 m, for 25 consecutive frames)──▶ TRACKING
+TRACKING ──(criteria continue to hold for 50 more frames)────▶ LOCKED
+LOCKED ──(5 consecutive out-of-gate frames | σ explodes | 200 ms gap)──▶ SEARCH
+```
+
+The `LOCKED` state is exposed both on the CSV (`lock_state` column) and
+on the next downstream stream as bit `AEGIS_FLAG_LOCKED = 0x04`.
+
+---
+
+## Fire-control loop — track / hook / engage / knock-down
+
+The fourth process, `engagement_engine/main.py`, closes the loop with a
+**simulated Proportional-Navigation interceptor**.
+
+### Guidance — true Proportional Navigation
+
+Let $\mathbf{r}$ be the relative position of the (estimated) target wrt
+the interceptor and $\mathbf{v}_\text{rel}$ its derivative. The LOS
+rotation rate is
+
+$$\boldsymbol{\Omega}_\text{LOS} = \frac{\mathbf{r} \times \mathbf{v}_\text{rel}}{|\mathbf{r}|^2}$$
+
+and the closing speed $V_c = -\mathbf{\hat{u}}_\text{LOS}\cdot\mathbf{v}_\text{rel}$.
+True PN commands a lateral acceleration
+
+$$\mathbf{a}_\text{cmd} = N' \, V_c \, \big(\boldsymbol{\Omega}_\text{LOS} \times \mathbf{\hat{u}}_\text{LOS}\big),
+\qquad N' \in [3,5]$$
+
+saturated at `max_lateral_g * g` (default 40 g). Crucially, the guidance
+closes on the **EKF estimate**, never on the truth — the whole point of
+having a tracker is to feed it to a controller that cannot see the
+ground state.
+
+### Interceptor dynamics — 3-DoF point mass, RK4
+
+$$
+\begin{aligned}
+\dot{\mathbf{r}} &= \mathbf{v} \\
+\dot{\mathbf{v}} &= \frac{T - D}{m}\,\mathbf{\hat{v}} + \mathbf{a}_\text{cmd} + \mathbf{g} \\
+\dot{m}          &= -T / v_e  \quad\text{(while propellant remains, else}\ T = 0\text{)}
+\end{aligned}
+$$
+
+with quadratic drag $D = C_d \cdot A \cdot |\mathbf{v}|^2$ and gravity
+$\mathbf{g} = (0,0,-g)$. The constant exhaust velocity $v_e$ gives a
+constant mass-flow $\dot{m} = T/v_e$ during the boost phase. All
+parameters live in [`engagement_engine/config.yaml`](engagement_engine/config.yaml).
+
+### Termination — KILL / MISS
+
+The CPA (closest point of approach) is tracked online. The engagement
+terminates as:
+
+* **`KILL`** when `CPA < lethal_radius_m` (default 5 m), or
+* **`MISS`** on flight-time exceeded (default 30 s), or when range starts
+  increasing past CPA + 50 m (the interceptor has overshot).
+
+On terminal state the engine refines CPA against the **truth** (not the
+estimate it was guiding on), so the reported number is the physically
+honest one — independent of EKF over-/under-confidence.
+
+### Monte-Carlo evaluation
+
+Run a batch:
+
+```bash
+./mc_demo.sh 20     # 20 independent engagements, ~45 s each
+```
+
+Each engagement re-seeds the Julia SDE, spawns the full 4-process
+pipeline, parses the outcome, and appends a row to `mc_results.csv`
+with columns `run_idx, outcome, cpa_m, flight_time_s, fuel_used_pct,
+pred_miss_m`. The kill probability $P_k$ is printed at the end and the
+notebook (§ 12) plots the miss-distance and time-to-kill histograms.
 
 ---
 
@@ -296,11 +386,15 @@ AEGIS-LINK/
 ├── tracking_system/
 │   ├── main.cpp                    # EKF (9-D CA, Joseph form, χ² gate)
 │   └── CMakeLists.txt              # Ninja, -O3 -march=native, no fast-math
-├── ai_orchestrator/main.py         # Mahalanobis + streak detector + CSV
+├── ai_orchestrator/main.py         # Mahalanobis + streak detector + lock FSM + CSV
+├── engagement_engine/
+│   ├── main.py                     # PN interceptor (3-DoF RK4, KILL/MISS FSM)
+│   └── config.yaml                 # interceptor & guidance parameters
 ├── viz_live.py                     # live 3-D tactical radar (matplotlib)
-├── analysis.ipynb                  # post-run notebook (11 sections)
+├── analysis.ipynb                  # post-run notebook (12 sections incl. Pk)
 ├── install_all.sh                  # one-shot provisioning (WSL2 / Ubuntu)
-├── run_demo.sh                     # one-click end-to-end demo
+├── run_demo.sh                     # one-click end-to-end demo (4 processes)
+├── mc_demo.sh                      # Monte-Carlo Pk driver (N engagements)
 ├── README.md
 └── LICENSE
 ```
@@ -309,11 +403,17 @@ AEGIS-LINK/
 
 ## Roadmap / what's intentionally next
 
+- [x] **Fire-control loop**: PN interceptor on the EKF estimate, KILL/MISS
+      decisioning, Monte-Carlo Pk evaluation (see "Fire-control loop"
+      section above). *Done in this revision.*
 - [ ] Replace the constant `Q_JERK_PSD` with an **adaptive process-noise**
       scheme (IMM or Sage-Husa) so the filter calibrates itself instead
       of being tuned by hand.
 - [ ] Multi-target version: replace the single EKF with a **JPDA / GM-PHD**
       filter and broadcast the resulting track set on a fan-out ZMQ socket.
+- [ ] Port `engagement_engine` to C++ for sub-millisecond guidance loop
+      latency (current Python loop is comfortable at 100 Hz but pays a
+      GIL tax under heavy ZMQ traffic).
 - [ ] Replace the χ² gate with a **Bayesian model-comparison** alert
       (CA vs CV vs Singer) so the orchestrator outputs *which* manoeuvre
       family is firing, not just "something is off".

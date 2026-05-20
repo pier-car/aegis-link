@@ -1,0 +1,54 @@
+# =============================================================================
+#  AEGIS-LINK :: engagement_engine/config.yaml
+# -----------------------------------------------------------------------------
+#  Interceptor and guidance parameters.
+#
+#  The numbers below are deliberately illustrative — a small surface-launched
+#  counter-UAS interceptor, not a flight-qualified vehicle. They are chosen to
+#  produce visually clean Proportional-Navigation engagements against the
+#  ballistic / OU-wind drone scenario produced by simulation_engine/main.jl.
+# =============================================================================
+
+interceptor:
+  # Initial state. The interceptor is launched from the EKF's current
+  # ground-projection (x,y, z=launch_alt_m) at the moment the lock is
+  # promoted to LOCKED; below is only the launch site offset relative to
+  # the world origin (the same origin used by the simulator).
+  launch_offset_m: [0.0, 0.0, 0.0]
+  launch_alt_m:    2.0
+
+  # Mass-burn model (constant exhaust velocity).
+  mass_kg:           12.0      # initial mass (including propellant)
+  propellant_kg:     6.0       # mass of usable propellant
+  thrust_N:        1800.0      # constant during boost; 0 once propellant is exhausted
+  exhaust_vel_mps: 1900.0      # m_dot = thrust_N / exhaust_vel_mps
+
+  # Aerodynamics (very crude — quadratic drag in body frame).
+  drag_coef:         0.30      # Cd * A * 0.5 * rho  (lumped, SI units)
+  cross_section_m2:  0.012
+
+  # Manoeuvrability cap (lateral acceleration command).
+  max_lateral_g:    40.0       # hard saturation on |a_cmd_perp|
+
+guidance:
+  # Proportional Navigation: a_cmd = N' * V_c * Omega_LOS
+  # (true PN; N' is the "effective navigation ratio")
+  nav_ratio_N:       4.0
+  # Latency from the EKF estimate timestamp to a command being acted on.
+  command_latency_s: 0.020
+
+engagement:
+  # Lethal radius: declared KILL when CPA (closest point of approach) < this.
+  lethal_radius_m:   5.0
+  # Hard fail-safes on the loop.
+  max_flight_time_s: 30.0      # MISS if exceeded
+  abort_range_m:    50.0       # MISS if range starts increasing past CPA + 50 m
+  # Update / publish rate (Hz). Kept at the wire-link's nominal 100 Hz.
+  loop_hz:         100.0
+
+network:
+  # Inbound: same endpoints as the orchestrator.
+  truth_endpoint:    "tcp://127.0.0.1:5555"
+  estimate_endpoint: "tcp://127.0.0.1:5556"
+  # Outbound: engagement telemetry.
+  publish_endpoint:  "tcp://*:5557"
