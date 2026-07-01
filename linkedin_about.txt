@@ -1,8 +1,8 @@
-I turn physical systems into things you can actually compute with — and then ship.
+I turn physical systems into things you can actually compute with, and then ship.
 
 MSc in Physics of Complex Systems (Politecnico di Torino). My work sits at the intersection of physics-based modelling, state estimation, and production software.
 
-At Pirelli I built a computer-vision metrology system from scratch as the sole engineer — 0.05 mm resolution, €48k saved, 96% under commercial quote, in production use. On my own time I built AEGIS-LINK: a sensor-fusion pipeline across C++, Julia and Python with a 9-state EKF at 100 Hz and p99 latency under 12 ms.
+At Pirelli I built a computer-vision metrology system from scratch as the sole engineer: 0.05 mm resolution, 48k EUR saved, 96% under commercial quote, in production use. On my own time I built AEGIS-LINK: a sensor-fusion pipeline across C++, Julia and Python with a 9-state EKF at 100 Hz and p99 latency under 12 ms.
 
 I'm looking for roles in Aerospace & Defence, Automotive, Energy, Deep Tech, or Quantitative Finance where the physics of the problem still matters.
 
