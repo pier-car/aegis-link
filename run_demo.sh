@@ -101,6 +101,12 @@ while ! ss -tnl 2>/dev/null | grep -q ':5557 '; do
     fi
 done
 
+# --- 5) IRST sensor model Python (SUB :5555 / PUB :5558) ----------------
+log "Avvio IRST sensor model (passive IR, PUB :5558)..."
+( "$ROOT/.venv/bin/python" "$ROOT/ir_sensor/main.py" \
+    > /dev/null 2> "$ROOT/logs/irst.err" ) &
+PIDS+=("$!")
+
 # --- Watchdog ------------------------------------------------------------
 log "Simulazione in corso... (Ctrl-C per interrompere prima)"
 SECS=0
@@ -140,6 +146,7 @@ cat <<EOF
   Log trk        : logs/trk.log
   Log orch       : logs/orch.err
   Log engage     : logs/engage.err
+  Log irst       : logs/irst.err
 
   Prossimo passo (analisi grafica):
 

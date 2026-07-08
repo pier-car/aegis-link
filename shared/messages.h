@@ -83,7 +83,8 @@ enum AegisProducer {
     AEGIS_PRODUCER_SIMULATOR    = 1u,
     AEGIS_PRODUCER_TRACKER      = 2u,
     AEGIS_PRODUCER_ORCHESTRATOR = 3u,
-    AEGIS_PRODUCER_INTERCEPTOR  = 4u   /* fire-control / PN guidance engine    */
+    AEGIS_PRODUCER_INTERCEPTOR  = 4u,  /* fire-control / PN guidance engine    */
+    AEGIS_PRODUCER_IR_SENSOR    = 5u   /* passive IRST sensor (tcp://*:5558)   */
 };
 
 /* Bit flags. */
