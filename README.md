@@ -63,17 +63,22 @@ during a technical interview.
 │ simulation_engine (Julia)│ ─────────────────────▶ │ tracking_system  (C++20) │
 │  SDE: ballistic + OU wind│   raw 128-byte frames  │  EKF, CA model, χ² gate  │
 │  100 Hz wall-paced       │     (zero-copy)        │  Joseph-form update      │
-└──────────────────────────┘                        └────────────┬─────────────┘
-              │                                                  │ PUB tcp://*:5556
-              │                                                  ▼
-              │                                  ┌──────────────────────────────┐
-              │                                  │ ai_orchestrator (Python 3.12)│
-              │                                  │  Mahalanobis d² + streak gate│
-              │                                  │  lock FSM (SEARCH/TRK/LOCKED)│
-              │                                  │  CSV log for analysis        │
-              │                                  └────────────┬─────────────────┘
-              │                                               │
-              ▼                                               ▼
+└──────────┬───────────────┘                        └────────────┬─────────────┘
+           │                                                     │ PUB tcp://*:5556
+           │                                                     ▼
+           │                                     ┌──────────────────────────────┐
+           │  SUB tcp://127.0.0.1:5555           │ ai_orchestrator (Python 3.12)│
+           │                                     │  Mahalanobis d² + streak gate│
+           ├────────────────────▶                │  lock FSM (SEARCH/TRK/LOCKED)│
+           │    ┌──────────────────────────┐     │  CSV log for analysis        │
+           │    │  ir_sensor   (Python)    │     └────────────┬─────────────────┘
+           │    │  Passive MWIR IRST       │                  │
+           │    │  bearing-only det. model │                  ▼
+           │    │  PUB tcp://*:5558 ───────┼──▶ ┌─────────────────────────────────────┐
+           │    └──────────────────────────┘    │  viz_live.py  (live tactical)        │
+           │                                    │  analysis.ipynb (post-mortem)        │
+           │                                    │  shows truth/EKF/interceptor/IR      │
+           ▼                                    └─────────────────────────────────────┘
 ┌──────────────────────────────┐  ◀────────────────  ┌──────────────────────────────┐
 │  viz_live.py (live tactical) │   PUB tcp://*:5557  │ engagement_engine  (Python)  │
 │  analysis.ipynb (post-mortem)│  EngagementPacket   │  PN guidance + 3-DoF intc    │
@@ -81,9 +86,9 @@ during a technical interview.
 └──────────────────────────────┘                     └──────────────────────────────┘
 ```
 
-Four asynchronous OS processes, three different runtimes, **one shared C-ABI
+Five asynchronous OS processes, three different runtimes, **one shared C-ABI
 struct**: [shared/messages.h](shared/messages.h) — 128 bytes, two cache
-lines, no padding ambiguity, identical wire layout in all four. The new
+lines, no padding ambiguity, identical wire layout in all five. The new
 `EngagementPacket` (`producer_id = 4`) is a typedef alias of `TrackPacket`:
 same offsets, same `static_assert`s, semantically reinterpreting `state[]`
 as interceptor (pos, vel) and `cov_diag[]` as fire-control telemetry
@@ -103,9 +108,10 @@ commanded |a|).
 | [ai_orchestrator/main.py](ai_orchestrator/main.py) | Real-time fusion: Mahalanobis distance + χ² gate + 3-frame streak filter + **lock FSM** (`SEARCH → TRACKING → LOCKED`), CSV writer | Python 3.12 + pyzmq + numpy |
 | [engagement_engine/main.py](engagement_engine/main.py) | **Fire-control loop**: PN guidance on the EKF estimate, 3-DoF interceptor (RK4, thrust/drag/mass-burn), KILL/MISS decisioning, publishes `EngagementPacket` on `:5557` | Python 3.12 + pyzmq + numpy + pyyaml |
 | [engagement_engine/config.yaml](engagement_engine/config.yaml) | Interceptor parameters (mass, thrust, max-G, lethal radius, N′) | YAML |
-| [viz_live.py](viz_live.py) | Live "tactical radar" 3-D scene with 3σ ellipsoid, interceptor track, LOS line, fire-control HUD, 30 FPS | matplotlib + pyzmq |
-| [analysis.ipynb](analysis.ipynb) | 12-section post-run notebook (sanity checks, χ² consistency test, residual stats, replay GIF, interactive Plotly scene, **engagement performance**) | Jupyter / pandas / matplotlib / plotly |
-| [run_demo.sh](run_demo.sh) | One-click orchestrator: starts the four processes, waits for the binds, writes `run.csv` + `engagement.csv`, cleans up on exit | bash |
+| [ir_sensor/main.py](ir_sensor/main.py) | **Passive MWIR IRST sensor** (bearing-only, 6-sub-model radiometric + detection + Cramér–Rao angular-noise chain), publishes `IRPacket` (`producer_id=5`) on `:5558`, optional CSV logger (`--csv`) | Python 3.12 + pyzmq + numpy |
+| [viz_live.py](viz_live.py) | Live "tactical radar" 3-D scene with 3σ ellipsoid, interceptor track, LOS line, **IR detection scatter** (true = filled dot, FA = hollow ×), fire-control HUD + IRST readout (SNR/τ/FA count), 30 FPS | matplotlib + pyzmq |
+| [analysis.ipynb](analysis.ipynb) | 13-section post-run notebook (sanity checks, χ² consistency test, residual stats, replay GIF, interactive Plotly scene, engagement performance, **§13 IRST sensor performance**) | Jupyter / pandas / matplotlib / plotly |
+| [run_demo.sh](run_demo.sh) | One-click orchestrator: starts the five processes, waits for the binds, writes `run.csv` + `engagement.csv` + `ir_sensor.csv`, cleans up on exit | bash |
 | [mc_demo.sh](mc_demo.sh) | **Monte-Carlo driver**: runs N independent engagements, aggregates Pk and miss-distance into `mc_results.csv` | bash |
 | [install_all.sh](install_all.sh) | Idempotent provisioning for WSL2 / Ubuntu 22.04+ | bash + apt + juliaup |
 
@@ -136,10 +142,14 @@ You get a dark "tactical radar" window with:
 
 * truth trajectory (neon green) vs EKF estimate (amber) in 3-D
 * a translucent **3σ uncertainty sphere** anchored on the latest estimate
+* **IRST detections** overlaid as a warm red-orange point scatter (true
+  detections = filled circle, false alarms = hollow ×)
 * three side panels scrolling at 30 FPS: position error, Mahalanobis $d^2$
   (log scale, with $\chi^2$ thresholds), altitude truth-vs-estimate
 * a **MANEUVER DETECTED** banner that lights up when the orchestrator
   confirms an alert
+* a rolling **IRST readout** in the status bar: detection count, latest
+  SNR, atmospheric τ, and false-alarm count (silent when `:5558` is absent)
 
 It's pure matplotlib + pyzmq — runs comfortably on an Intel Iris Xe in
 WSL2 (the Wayland backend exposed by WSLg is auto-detected).
@@ -319,7 +329,117 @@ notebook (§ 12) plots the miss-distance and time-to-kill histograms.
 
 ---
 
-## The 128-byte data link
+## Passive IRST sensor — bearing-only IR detections
+
+The fifth process, `ir_sensor/main.py`, adds a passive
+**Infrared Search and Track (IRST)** sensor to the pipeline.
+
+### What it is and why it was added
+
+An IRST is a **passive, staring focal-plane array** in the
+**MWIR (3–5 μm)** band mounted at a fixed ground site and
+continuously surveying the surveillance hemisphere.
+
+**Why add it?**  Radar is active: it floods the sky with RF energy
+that the target can detect (RWR), jam, or home on.  A passive IRST
+emits *nothing* — the target cannot detect or jam it.  It is therefore
+a **complementary, emission-free** sensor whose availability degrades
+differently under threat than radar.  In modern air-defence
+architectures both sensor types coexist precisely because their
+vulnerability profiles are orthogonal.
+
+Adding an IRST to AEGIS-LINK demonstrates **multi-sensor / sensor-fusion
+literacy** — the ability to ingest heterogeneous, asynchronous
+measurements (bearing-only vs. range-resolved) into a shared tracking
+state.  That intersection of detection theory, radiometric modelling,
+and Bayesian estimation is exactly the skill set that aerospace and
+defence sector interviews test.
+
+Unlike the EKF tracker (which has centimetre-level position from
+range-resolved measurements), the IRST is a **bearing-only** angle
+sensor with *weak passive range observability*.  The reported position
+is reconstructed from measured azimuth/elevation plus a kinematic
+range prior; the covariance honestly reflects this: **small
+cross-range variance** $(R\,\sigma_\theta)^2$, **large along-range
+variance** $(\sigma_{r_\text{frac}} \cdot R)^2$.
+
+### The six physics sub-models
+
+**1. Radiometric target signature — aerodynamic skin-heating**
+
+$$I(v) = I_0 \cdot \bigl(1 + \kappa \cdot (|\mathbf{v}| / v_{\text{ref}})^2\bigr)$$
+
+Aerodynamic heating raises the target's surface temperature
+proportionally to kinetic energy flux ($\propto |\mathbf{v}|^2$),
+increasing its MWIR radiant intensity above the cold-body baseline
+$I_0 \approx 200$ W/sr.  $\kappa = 0.8$, $v_{\text{ref}} = 300$ m/s.
+
+**2. Atmospheric transmission — Beer–Lambert, MWIR clear-air window**
+
+$$\tau(R) = \exp(-\alpha \cdot R), \qquad \alpha \approx 2\times 10^{-5}\,\text{m}^{-1}$$
+
+$\alpha \approx 0.02$ dB/km for a standard clear-air MWIR model
+(the 3–5 μm band sits in a molecular transmission window bounded by
+CO₂ and H₂O absorption bands).  Under moderate haze $\alpha$
+can reach $5\times 10^{-5}$ m$^{-1}$.
+
+**3. SNR at the focal plane**
+
+$$\text{SNR} = \frac{I \cdot \tau / R^2}{\text{NEI}}$$
+
+$I \cdot \tau / R^2$ is the signal irradiance at the aperture [W/m²].
+Dividing by the **Noise-Equivalent Irradiance** NEI converts to linear
+SNR.  NEI $\approx 5\times 10^{-11}$ W/m² is achievable for a cooled
+**InSb/MCT FPA** at 10 ms integration, 15 cm aperture, f/4 optics.
+
+**4. Detection probability — logistic (Albersheim / Swerling-1)**
+
+$$P_D = \sigma\!\bigl(k \cdot (\text{SNR} - \text{SNR}_{\text{thresh}})\bigr)$$
+
+$\text{SNR}_{\text{thresh}} = 4$ gives $P_D \approx 0.5$ at threshold,
+rising steeply to 1 above it ($k = 1.5$).  The logistic curve
+approximates the Albersheim/Swerling-1 receiver-operating-characteristic
+without requiring tabulated integrals.
+
+**5. Angular noise — Cramér–Rao bound for focal-plane centroiding**
+
+$$\sigma_\theta = \frac{\text{IFOV}}{\sqrt{2}\cdot\text{SNR}}, \quad
+  \text{clipped to } [\,0.02,\; 5\,]\text{ mrad}$$
+
+This is the theoretical minimum angular uncertainty (Cramér–Rao lower
+bound) for centroid estimation of a diffraction-limited point source on
+a photon-limited focal plane.  IFOV $= 0.1$ mrad for a 15 cm/f4
+aperture with 15 μm pitch detector.
+
+**6. False alarms — Poisson background clutter**
+
+Background clutter (hot rocks, atmospheric emission features, stray
+reflections) generates spatially random false detections at rate
+$\lambda_{\text{FA}} \approx 5\times 10^{-7}$ per frame.  Injected
+false-alarm packets carry the `AEGIS_FLAG_TEST` bit so that downstream
+consumers can identify and suppress them.
+
+### Wire semantics for `producer_id = 5`
+
+| field | meaning |
+|-------|---------|
+| `state[0:3]` | estimated ENU position [m], from noisy AZ/EL + kinematic range prior |
+| `state[3:6]` | velocity estimate [m/s], finite-differenced over two consecutive detections |
+| `cov_diag[0:2]` | ENU position variances [m²] — cross-range $(R\,\sigma_\theta)^2$ (small), along-range $(\sigma_\text{frac}\,R)^2$ (large) |
+| `cov_diag[3]` | velocity variance [m²/s²] |
+| `cov_diag[4]` | SNR (diagnostic, not a covariance) |
+| `cov_diag[5]` | atmospheric transmission τ (diagnostic) |
+| `flags & 0x8000` | set on false-alarm packets (`AEGIS_FLAG_TEST`) |
+
+Missed detections emit **no packet** — silence is the correct passive-sensor
+semantic for a missed frame.
+
+`viz_live.py` overlays the IR detections live (true detections as filled
+circles, false alarms as hollow ×).  `analysis.ipynb` § 13 characterises
+sensor performance offline: SNR vs range, atmospheric τ, IR position error
+vs truth, and the along-range / cross-range variance split.
+
+---
 
 [shared/messages.h](shared/messages.h) defines the wire contract:
 
@@ -327,12 +447,14 @@ notebook (§ 12) plots the miss-distance and time-to-kill histograms.
 offset  size   field
 ------  ----   ----------------------------------------------------------
    0      4    packet_id            (monotonic per-publisher counter)
-   4      4    producer_id          (1=sim, 2=tracker, 3=orchestrator)
+   4      4    producer_id          (1=sim, 2=tracker, 3=orchestrator,
+                                     4=interceptor, 5=IR sensor)
    8      8    timestamp_ns         (CLOCK_TAI ns since Unix epoch)
   16     48    state[6]             (x,y,z, vx,vy,vz)        [m, m/s]
   64     48    cov_diag[6]          (sigma^2 of the 6 state comps)
  112      2    schema_version
- 114      2    flags                (bit 0 = MANEUVER, bit 1 = LOST_TRK)
+ 114      2    flags                (bit 0 = MANEUVER, bit 1 = LOST_TRK,
+                                     bit 15 = TEST/false-alarm)
  116     12    _padding             (zeroed)
 total  128
 ```
@@ -390,10 +512,11 @@ AEGIS-LINK/
 ├── engagement_engine/
 │   ├── main.py                     # PN interceptor (3-DoF RK4, KILL/MISS FSM)
 │   └── config.yaml                 # interceptor & guidance parameters
-├── viz_live.py                     # live 3-D tactical radar (matplotlib)
-├── analysis.ipynb                  # post-run notebook (12 sections incl. Pk)
+├── ir_sensor/main.py               # passive MWIR IRST sensor (bearing-only, producer_id=5)
+├── viz_live.py                     # live 3-D tactical radar (matplotlib) + IR overlay
+├── analysis.ipynb                  # post-run notebook (13 sections incl. Pk + IRST §13)
 ├── install_all.sh                  # one-shot provisioning (WSL2 / Ubuntu)
-├── run_demo.sh                     # one-click end-to-end demo (4 processes)
+├── run_demo.sh                     # one-click end-to-end demo (5 processes)
 ├── mc_demo.sh                      # Monte-Carlo Pk driver (N engagements)
 ├── README.md
 └── LICENSE
@@ -406,6 +529,18 @@ AEGIS-LINK/
 - [x] **Fire-control loop**: PN interceptor on the EKF estimate, KILL/MISS
       decisioning, Monte-Carlo Pk evaluation (see "Fire-control loop"
       section above). *Done in this revision.*
+- [x] **Passive IRST sensor**: MWIR bearing-only sensor model with 6
+      physics sub-models (radiometric signature, Beer–Lambert transmission,
+      SNR, Albersheim detection probability, Cramér–Rao angular noise,
+      Poisson false alarms), `viz_live.py` IR overlay, `ir_sensor.csv`
+      logger, and `analysis.ipynb` §13 performance section. *Done in this revision.*
+- [ ] **Multi-sensor fusion**: fuse the IR bearing-only measurement
+      (azimuth/elevation) as a genuine second observation into the EKF —
+      a 2-D angular update alongside the existing 3-D position update.
+      This is the natural next step: it closes the loop between the passive
+      sensor and the tracker, demonstrates the full sensor-fusion pipeline
+      (heterogeneous measurement models, mixed observability), and is
+      exactly what a defence-sector technical interview will ask about.
 - [ ] Replace the constant `Q_JERK_PSD` with an **adaptive process-noise**
       scheme (IMM or Sage-Husa) so the filter calibrates itself instead
       of being tuned by hand.

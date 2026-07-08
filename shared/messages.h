@@ -23,7 +23,8 @@
  *      offset  size   field
  *      ------  ----   ---------------------------------------------------------
  *        0      4     packet_id            (monotonic per-publisher counter)
- *        4      4     producer_id          (1=sim, 2=tracker, 3=orchestrator)
+ *        4      4     producer_id          (1=sim, 2=tracker, 3=orchestrator,
+ *                                            4=interceptor, 5=IR sensor)
  *        8      8     timestamp_ns         (CLOCK_TAI, ns since Unix epoch)
  *       16     48     state[6]             (x,y,z, vx,vy,vz)            [m, m/s]
  *       64     48     cov_diag[6]          (sigma^2 of the 6 state comps)
