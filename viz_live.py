@@ -7,14 +7,23 @@ Real-time "tactical radar room" viewer.
 Subscribes simultaneously to:
   * tcp://127.0.0.1:5555  -> ground truth (Julia simulator)
   * tcp://127.0.0.1:5556  -> EKF estimate (C++ tracker)
+  * tcp://127.0.0.1:5557  -> interceptor / fire-control (engagement engine)
+  * tcp://127.0.0.1:5558  -> passive IRST detections (IR sensor)
 
 and renders, at ~30 FPS, a dark-themed scene with:
-  - 3D trajectory (truth = neon green, EKF estimate = amber)
+  - 3D trajectory (truth = neon green, EKF estimate = amber,
+    interceptor = cyan, IRST detections = warm red-orange scatter)
   - 3-sigma uncertainty sphere on the latest estimate
-  - side telemetry panel: |err|, d^2, altitude, speed, alert flag
+  - IR false-alarm packets rendered with a hollow × so clutter is
+    visually separable from true detections
+  - side telemetry panel: |err|, d², altitude, speed, alert flag
+  - HUD line showing IRST detection count, latest SNR/τ, false-alarm count
 
 Designed to run on integrated GPUs (Iris Xe class): no shaders, no VTK,
 just matplotlib drawing thin lines on a black canvas. CPU cost is ~5%.
+
+The IR overlay degrades gracefully when nothing is publishing on :5558
+(older runs, or when the IR process was not started).
 
 Usage
 -----
@@ -79,15 +88,19 @@ assert _PKT_SIZE == 128
 PROD_SIM         = 1
 PROD_TRACKER     = 2
 PROD_INTERCEPTOR = 4
+PROD_IR_SENSOR   = 5   # AEGIS_PRODUCER_IR_SENSOR (shared/messages.h)
 FLAG_MANEUVER = 0x0001
 FLAG_LOCKED   = 0x0004
 FLAG_ENGAGED  = 0x0008
 FLAG_KILL     = 0x0010
 FLAG_MISS     = 0x0020
+# FLAG_TEST = 0x8000 must match AEGIS_FLAG_TEST = 0x8000u in shared/messages.h
+FLAG_TEST     = 0x8000   # set on IR false-alarm (synthetic clutter) packets
 
 ENDPOINT_TRUTH      = "tcp://127.0.0.1:5555"
 ENDPOINT_ESTIMATE   = "tcp://127.0.0.1:5556"
 ENDPOINT_ENGAGEMENT = "tcp://127.0.0.1:5557"
+ENDPOINT_IR         = "tcp://127.0.0.1:5558"
 
 
 @dataclass
@@ -162,6 +175,7 @@ class _Stream:
 TRUTH_COLOR       = "#00ff9a"   # neon green
 ESTIMATE_COLOR    = "#ffb000"   # amber
 INTERCEPTOR_COLOR = "#00d9ff"   # cyan
+IR_COLOR          = "#ff5a36"   # warm red-orange (IRST detections)
 LOS_COLOR         = "#ff66cc"   # magenta (LOS line interceptor->target)
 GRID_COLOR        = "#1f3a3a"
 ALERT_COLOR       = "#ff2e63"
@@ -198,6 +212,8 @@ class LiveViewer:
         self.truth = _Stream(ENDPOINT_TRUTH)
         self.est   = _Stream(ENDPOINT_ESTIMATE)
         self.intc  = _Stream(ENDPOINT_ENGAGEMENT)
+        # IR stream: gracefully silent when nothing publishes on :5558
+        self.ir    = _Stream(ENDPOINT_IR, maxlen=2000)
 
         _setup_style()
         self.fig = plt.figure(figsize=(13, 7.5), num="AEGIS-LINK :: live")
@@ -251,6 +267,19 @@ class LiveViewer:
         self._intc_head   = self.ax3d.scatter([], [], [], c=INTERCEPTOR_COLOR, s=30,
                                               marker="^")
         self._sigma_surf  = None  # rebuilt each frame
+
+        # IRST detection scatter — bearing-only noisy point cloud.
+        # True detections: filled circles; false alarms (FLAG_TEST): hollow ×.
+        # Bounded ring (maxlen=2000 on the _Stream); here we keep only the
+        # last _IR_TRAIL points to avoid scene crowding.
+        self._IR_TRAIL = 300
+        self._ir_pts_true = self.ax3d.scatter(
+            [], [], [], c=IR_COLOR, s=8, alpha=0.75, marker="o",
+            label="IRST det.")
+        self._ir_pts_fa   = self.ax3d.scatter(
+            [], [], [], facecolors="none", edgecolors=IR_COLOR,
+            s=18, alpha=0.5, marker="x",
+            label="IRST FA")
 
         self.ax3d.legend(loc="upper right", framealpha=0.0,
                          labelcolor=TEXT_COLOR, fontsize=9)
@@ -336,8 +365,33 @@ class LiveViewer:
             ip = np.empty((0, 3))
             self._los_line.set_data_3d([], [], [])
 
-        all_pts = np.vstack([tp, ep, ip]) if (tp.size or ep.size or ip.size) \
-            else np.empty((0, 3))
+        # ---- IRST detections (scatter of points, bounded trailing window) ----
+        # IR packets arrive when the IRST process is running; gracefully absent
+        # otherwise.  True detections = filled dot; false alarms = hollow ×.
+        ir_true_pts = np.empty((0, 3))
+        ir_fa_pts   = np.empty((0, 3))
+        if self.ir.buf:
+            ir_all = list(self.ir.buf)[-self._IR_TRAIL:]
+            true_pos = [s.pos for s in ir_all if not (s.flags & FLAG_TEST)]
+            fa_pos   = [s.pos for s in ir_all if      s.flags & FLAG_TEST]
+            if true_pos:
+                ir_true_pts = np.array(true_pos)
+                self._ir_pts_true._offsets3d = (
+                    ir_true_pts[:, 0], ir_true_pts[:, 1], ir_true_pts[:, 2])
+            else:
+                self._ir_pts_true._offsets3d = ([], [], [])
+            if fa_pos:
+                ir_fa_pts = np.array(fa_pos)
+                self._ir_pts_fa._offsets3d = (
+                    ir_fa_pts[:, 0], ir_fa_pts[:, 1], ir_fa_pts[:, 2])
+            else:
+                self._ir_pts_fa._offsets3d = ([], [], [])
+        else:
+            self._ir_pts_true._offsets3d = ([], [], [])
+            self._ir_pts_fa._offsets3d   = ([], [], [])
+
+        all_pts_list = [a for a in (tp, ep, ip, ir_true_pts, ir_fa_pts) if a.size > 0]
+        all_pts = np.vstack(all_pts_list) if all_pts_list else np.empty((0, 3))
         self._autorange_3d(all_pts)
 
         # 3-sigma sphere on latest estimate
@@ -439,6 +493,29 @@ class LiveViewer:
         else:
             self.hud.set_text("AEGIS-LINK / TACTICAL  ::  awaiting telemetry...")
 
+        # ---- IRST readout on the alert box (appended) ----
+        # Show: total detections, latest SNR / tau (from cov_diag[4]/[5]),
+        # and false-alarm count.  Absent when :5558 is silent.
+        if self.ir.buf:
+            ir_all_now = list(self.ir.buf)
+            n_ir_total = len(ir_all_now)
+            n_ir_fa    = sum(1 for s in ir_all_now if s.flags & FLAG_TEST)
+            n_ir_true  = n_ir_total - n_ir_fa
+            # Find the most-recent non-FA packet for diagnostics.
+            last_true = next(
+                (s for s in reversed(ir_all_now) if not (s.flags & FLAG_TEST)),
+                None)
+            if last_true is not None:
+                ir_snr = float(last_true.cov_diag[4])
+                ir_tau = float(last_true.cov_diag[5])
+                ir_hud = (f"   IRST det={n_ir_true}  FA={n_ir_fa}"
+                          f"  SNR={ir_snr:.1f}  τ={ir_tau:.3f}")
+            else:
+                ir_hud = f"   IRST det={n_ir_true}  FA={n_ir_fa}"
+            # Append to existing alert box (keep fire-control line intact).
+            prev = self.alert_box.get_text()
+            self.alert_box.set_text(prev + ir_hud if prev else ir_hud.strip())
+
         return ()
 
     # ------------------------------------------------------------------
@@ -446,12 +523,14 @@ class LiveViewer:
         self.truth.stop()
         self.est.stop()
         self.intc.stop()
+        self.ir.stop()
         plt.close(self.fig)
 
     def run(self):
         self.truth.start()
         self.est.start()
         self.intc.start()
+        self.ir.start()
         interval_ms = int(1000 / self.fps)
         # cache_frame_data=False because we render off live deques
         self._anim = animation.FuncAnimation(
@@ -468,6 +547,7 @@ def main():
     print(f"  truth      <- {ENDPOINT_TRUTH}")
     print(f"  estimate   <- {ENDPOINT_ESTIMATE}")
     print(f"  interceptor<- {ENDPOINT_ENGAGEMENT}")
+    print(f"  IR sensor  <- {ENDPOINT_IR}  (optional — silent if not running)")
     print("  close the window or Ctrl+C to quit.")
     LiveViewer(history_s=30.0, fps=30).run()
     return 0

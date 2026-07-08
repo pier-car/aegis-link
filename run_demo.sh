@@ -102,8 +102,10 @@ while ! ss -tnl 2>/dev/null | grep -q ':5557 '; do
 done
 
 # --- 5) IRST sensor model Python (SUB :5555 / PUB :5558) ----------------
-log "Avvio IRST sensor model (passive IR, PUB :5558)..."
+log "Avvio IRST sensor model (passive IR, PUB :5558, CSV -> ir_sensor.csv)..."
+rm -f "$ROOT/ir_sensor.csv"
 ( "$ROOT/.venv/bin/python" "$ROOT/ir_sensor/main.py" \
+    --csv "$ROOT/ir_sensor.csv" \
     > /dev/null 2> "$ROOT/logs/irst.err" ) &
 PIDS+=("$!")
 
@@ -142,6 +144,7 @@ cat <<EOF
 
   CSV tracker    : run.csv         ($N_LINES righe, $SIZE)
   CSV engagement : engagement.csv  ($E_LINES righe, $E_SIZE)
+  CSV ir sensor  : ir_sensor.csv
   Log sim        : logs/sim.log
   Log trk        : logs/trk.log
   Log orch       : logs/orch.err

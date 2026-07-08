@@ -8,6 +8,14 @@ Subscribes to  tcp://127.0.0.1:5555  (Julia truth stream, producer_id=1)
 Publishes      tcp://*:5558          (IRPacket, 128-byte TrackPacket layout,
                                       producer_id=5 = AEGIS_PRODUCER_IR_SENSOR)
 
+Optional CSV logging
+--------------------
+Pass ``--csv PATH`` to write one row per emitted packet to a CSV file.
+When omitted the process behaves exactly as before (stderr-only logging).
+The CSV header is:
+  ts_ns, is_false_alarm, px, py, pz, vx, vy, vz,
+  var_x, var_y, var_z, var_vel, snr, tau
+
 Sensor model
 ------------
 Passive staring FPA in the MWIR band (3–5 μm), boresighted on the
@@ -84,6 +92,8 @@ the absence of a detection; downstream consumers must handle gaps.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import math
 import signal
 import struct
@@ -108,8 +118,10 @@ PRODUCER_SIM      = 1
 PRODUCER_IR_SENSOR = 5   # AEGIS_PRODUCER_IR_SENSOR (shared/messages.h)
 
 # Flag bits (mirror shared/messages.h::AegisFlags).
+# FLAG_TEST = 0x8000 must match AEGIS_FLAG_TEST = 0x8000u in shared/messages.h.
+# If either changes the other MUST be updated in lockstep.
 FLAG_NONE     = 0x0000
-FLAG_TEST     = 0x8000   # set on false-alarm (synthetic) packets
+FLAG_TEST     = 0x8000   # set on false-alarm (synthetic) packets — see shared/messages.h AEGIS_FLAG_TEST
 
 # ---------------------------------------------------------------------------
 #  IRST sensor physical parameters
@@ -185,17 +197,38 @@ class TrackPacket:
         )
 
 
+_FINITE_SENTINEL = 1.0e38   # large-but-finite fallback for non-finite floats
+
+
+def _to_finite_f64(arr: np.ndarray) -> np.ndarray:
+    """Return a float64 copy of *arr* with any non-finite value replaced by
+    *_FINITE_SENTINEL*.  Ensures the TrackPacket wire format never carries
+    inf/nan that would poison downstream consumers."""
+    out = np.asarray(arr, dtype=np.float64).copy()
+    mask = ~np.isfinite(out)
+    if mask.any():
+        out[mask] = _FINITE_SENTINEL
+    return out
+
+
 def pack_ir_packet(pkt_id: int, ts_ns: int,
                    state6: np.ndarray, cov6: np.ndarray,
                    flags: int) -> bytes:
-    """Pack a 128-byte IRPacket (TrackPacket layout, producer_id=5)."""
+    """Pack a 128-byte IRPacket (TrackPacket layout, producer_id=5).
+
+    Defensively coerces state6 and cov6 to finite float64 — any non-finite
+    element is replaced with _FINITE_SENTINEL so a malformed packet is never
+    emitted on the wire.
+    """
+    s6 = _to_finite_f64(state6)
+    c6 = _to_finite_f64(cov6)
     return struct.pack(
         _PKT_FMT,
         int(pkt_id) & 0xFFFFFFFF,
         PRODUCER_IR_SENSOR,
         int(ts_ns)  & 0xFFFFFFFFFFFFFFFF,
-        *state6.tolist(),
-        *cov6.tolist(),
+        *s6.tolist(),
+        *c6.tolist(),
         SCHEMA_V,
         int(flags)  & 0xFFFF,
         b"\x00" * 12,
@@ -229,11 +262,20 @@ def compute_snr(intensity_w_sr: float, tau: float, range_m: float) -> float:
         E_sig = I · τ / R²   [W/m²]
 
     SNR = E_sig / NEI
+
+    Returns a finite, non-negative value; returns 0.0 when NEI is zero or
+    inputs would produce a non-finite result.
     """
     if range_m < 1.0:
         return float("inf")
+    if NEI_W_M2 <= 0.0:
+        # Degenerate sensor configuration — treat as undetectable.
+        return 0.0
     e_sig = intensity_w_sr * tau / (range_m * range_m)
-    return e_sig / NEI_W_M2
+    snr = e_sig / NEI_W_M2
+    if not math.isfinite(snr) or snr < 0.0:
+        return 0.0
+    return snr
 
 
 def detection_probability(snr: float) -> float:
@@ -342,9 +384,15 @@ class IRSTSensor:
         pos_est = self._sensor_pos + range_est * los_measured
 
         # --- Velocity estimate (finite difference over last two detections) ---
+        # NOTE: capture the previous timestamp into a local variable BEFORE
+        # overwriting self._prev_ts_ns.  Without this, dt_ref (computed below)
+        # would always see (current_ts - current_ts) == 0 and collapse to the
+        # 0.01 floor, making velocity variance systematically wrong.
+        prev_ts_for_dt = self._prev_ts_ns   # snapshot for dt/dt_ref calculations
+
         vel_est = np.zeros(3)
-        if self._prev_pos is not None and self._prev_ts_ns is not None:
-            dt = (int(truth.timestamp_ns) - self._prev_ts_ns) * 1e-9
+        if self._prev_pos is not None and prev_ts_for_dt is not None:
+            dt = (int(truth.timestamp_ns) - prev_ts_for_dt) * 1e-9
             if 0.0 < dt <= 1.0:
                 vel_est = (pos_est - self._prev_pos) / dt
 
@@ -369,10 +417,12 @@ class IRSTSensor:
 
         # Velocity variance — combine range-rate and cross-range-rate contributions.
         # This is an upper bound from the position noise propagated over one dt step.
-        if self._prev_ts_ns is not None:
-            dt_ref = max((int(truth.timestamp_ns) - self._prev_ts_ns) * 1e-9, 0.01)
+        # Use prev_ts_for_dt (the pre-update snapshot) so the interval is correct;
+        # at this point self._prev_ts_ns already holds the current timestamp.
+        if prev_ts_for_dt is not None:
+            dt_ref = max((int(truth.timestamp_ns) - prev_ts_for_dt) * 1e-9, 0.01)
         else:
-            dt_ref = 0.01
+            dt_ref = 0.01   # first detection: no previous sample, fall back to 10 ms floor
         vel_var_val = max((sigma_r ** 2 + sigma_cross ** 2) / (dt_ref ** 2), 1.0)
         vel_var = np.full(3, vel_var_val)
 
@@ -435,6 +485,7 @@ def run(
     sensor_y: float = 0.0,
     sensor_z: float = 0.0,
     rng_seed: int   = 0xBADF00D,
+    csv_path: Optional[str] = None,
 ) -> None:
     ctx = zmq.Context.instance()
 
@@ -454,6 +505,38 @@ def run(
     rng        = np.random.default_rng(rng_seed)
     sensor     = IRSTSensor(sensor_pos, rng)
 
+    # --- Optional CSV logger ---
+    _csv_file:   Optional[io.TextIOWrapper] = None
+    _csv_writer: Optional[csv.DictWriter]   = None
+    _CSV_FIELDS = [
+        "ts_ns", "is_false_alarm",
+        "px", "py", "pz",
+        "vx", "vy", "vz",
+        "var_x", "var_y", "var_z", "var_vel",
+        "snr", "tau",
+    ]
+    if csv_path is not None:
+        _csv_file = open(csv_path, "w", newline="", buffering=1)
+        _csv_writer = csv.DictWriter(_csv_file, fieldnames=_CSV_FIELDS)
+        _csv_writer.writeheader()
+        print(f"[irst] CSV log -> {csv_path}", file=sys.stderr, flush=True)
+
+    def _log_csv(ts_ns: int, is_fa: bool,
+                 state6: np.ndarray, cov6: np.ndarray,
+                 snr: float, tau: float) -> None:
+        if _csv_writer is None:
+            return
+        _csv_writer.writerow({
+            "ts_ns":         ts_ns,
+            "is_false_alarm": int(is_fa),
+            "px": state6[0], "py": state6[1], "pz": state6[2],
+            "vx": state6[3], "vy": state6[4], "vz": state6[5],
+            "var_x":  cov6[0], "var_y": cov6[1], "var_z": cov6[2],
+            "var_vel": cov6[3],
+            "snr": snr,
+            "tau": tau,
+        })
+
     pkt_id = 0
     n_rx   = 0
     n_det  = 0
@@ -469,69 +552,75 @@ def run(
     signal.signal(signal.SIGINT,  _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    while running:
-        try:
-            raw = sub.recv(flags=zmq.NOBLOCK)
-        except zmq.Again:
-            time.sleep(0.001)
-            continue
-        except zmq.ZMQError as exc:
-            if exc.errno in (zmq.ETERM, zmq.EINTR):
-                break
-            print(f"[irst] recv error: {exc}", file=sys.stderr, flush=True)
-            continue
-
-        n_rx += 1
-        try:
-            truth = TrackPacket.unpack(bytes(raw))
-        except ValueError as exc:
-            print(f"[irst] bad packet: {exc}", file=sys.stderr, flush=True)
-            continue
-
-        if truth.schema_version != SCHEMA_V or truth.producer_id != PRODUCER_SIM:
-            continue
-
-        ts_ns = truth.timestamp_ns
-
-        # --- True-target detection attempt -----------------------------------
-        result = sensor.process_truth(truth)
-        if result is not None:
-            state6, cov6, flags, snr, tau = result
-            pkt_id += 1
-            n_det  += 1
-            buf = pack_ir_packet(pkt_id, ts_ns, state6, cov6, flags)
+    try:
+        while running:
             try:
-                pub.send(buf, flags=zmq.NOBLOCK)
+                raw = sub.recv(flags=zmq.NOBLOCK)
             except zmq.Again:
-                pass
+                time.sleep(0.001)
+                continue
+            except zmq.ZMQError as exc:
+                if exc.errno in (zmq.ETERM, zmq.EINTR):
+                    break
+                print(f"[irst] recv error: {exc}", file=sys.stderr, flush=True)
+                continue
 
-            if n_det % 200 == 0:
-                r = float(np.linalg.norm(truth.state[0:3] - sensor_pos))
+            n_rx += 1
+            try:
+                truth = TrackPacket.unpack(bytes(raw))
+            except ValueError as exc:
+                print(f"[irst] bad packet: {exc}", file=sys.stderr, flush=True)
+                continue
+
+            if truth.schema_version != SCHEMA_V or truth.producer_id != PRODUCER_SIM:
+                continue
+
+            ts_ns = truth.timestamp_ns
+
+            # --- True-target detection attempt -----------------------------------
+            result = sensor.process_truth(truth)
+            if result is not None:
+                state6, cov6, flags, snr, tau = result
+                pkt_id += 1
+                n_det  += 1
+                buf = pack_ir_packet(pkt_id, ts_ns, state6, cov6, flags)
+                try:
+                    pub.send(buf, flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    pass
+                _log_csv(ts_ns, False, state6, cov6, snr, tau)
+
+                if n_det % 200 == 0:
+                    r = float(np.linalg.norm(truth.state[0:3] - sensor_pos))
+                    print(
+                        f"[irst] det={n_det:5d}  range={r/1e3:6.2f} km"
+                        f"  SNR={snr:6.1f}  tau={tau:.3f}"
+                        f"  miss={n_miss}  pos=({truth.state[0]:8.1f}"
+                        f", {truth.state[1]:8.1f}, {truth.state[2]:8.1f})",
+                        file=sys.stderr, flush=True,
+                    )
+            else:
+                n_miss += 1
+
+            # --- False alarm injection -------------------------------------------
+            fa = sensor.generate_false_alarm(ts_ns)
+            if fa is not None:
+                state6_fa, cov6_fa, flags_fa = fa
+                pkt_id += 1
+                n_fa   += 1
+                buf_fa = pack_ir_packet(pkt_id, ts_ns, state6_fa, cov6_fa, flags_fa)
+                try:
+                    pub.send(buf_fa, flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    pass
+                _log_csv(ts_ns, True, state6_fa, cov6_fa, 0.0, 0.0)
                 print(
-                    f"[irst] det={n_det:5d}  range={r/1e3:6.2f} km"
-                    f"  SNR={snr:6.1f}  tau={tau:.3f}"
-                    f"  miss={n_miss}  pos=({truth.state[0]:8.1f}"
-                    f", {truth.state[1]:8.1f}, {truth.state[2]:8.1f})",
+                    f"[irst] FALSE ALARM injected  n_fa={n_fa}",
                     file=sys.stderr, flush=True,
                 )
-        else:
-            n_miss += 1
-
-        # --- False alarm injection -------------------------------------------
-        fa = sensor.generate_false_alarm(ts_ns)
-        if fa is not None:
-            state6_fa, cov6_fa, flags_fa = fa
-            pkt_id += 1
-            n_fa   += 1
-            buf_fa = pack_ir_packet(pkt_id, ts_ns, state6_fa, cov6_fa, flags_fa)
-            try:
-                pub.send(buf_fa, flags=zmq.NOBLOCK)
-            except zmq.Again:
-                pass
-            print(
-                f"[irst] FALSE ALARM injected  n_fa={n_fa}",
-                file=sys.stderr, flush=True,
-            )
+    finally:
+        if _csv_file is not None:
+            _csv_file.close()
 
     print(
         f"[irst] done.  rx={n_rx}  detected={n_det}"
@@ -573,6 +662,15 @@ if __name__ == "__main__":
         metavar="HEX",
         help="RNG seed (hex with 0x prefix supported, default: 0xBADF00D)",
     )
+    ap.add_argument(
+        "--csv", default=None, metavar="PATH",
+        help=(
+            "Optional path for per-packet CSV log "
+            "(ts_ns, is_false_alarm, px, py, pz, vx, vy, vz, "
+            "var_x, var_y, var_z, var_vel, snr, tau). "
+            "When omitted, no CSV is written."
+        ),
+    )
     args = ap.parse_args()
     run(
         sub_addr = args.sub,
@@ -581,4 +679,5 @@ if __name__ == "__main__":
         sensor_y = args.sensor_y,
         sensor_z = args.sensor_z,
         rng_seed = args.seed,
+        csv_path = args.csv,
     )

@@ -63,6 +63,7 @@ NOTES_LOCAL.*
 logs/
 replay.gif
 replay.mp4
+ir_sensor.csv
 !docs/img/*.png
 !docs/img/*.gif
 
