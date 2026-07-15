@@ -1,0 +1,8 @@
+# AEGIS-LINK · Streamlit Interactive Demo — Python dependencies
+# Install:  pip install -r requirements.txt
+# Run:      streamlit run app.py
+
+streamlit>=1.35.0
+numpy>=1.26.0
+plotly>=5.22.0
+pandas>=2.2.0
